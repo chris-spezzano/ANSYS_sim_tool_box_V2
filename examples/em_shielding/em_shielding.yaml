@@ -1,0 +1,45 @@
+# em_shielding.yaml — EMI shielding effectiveness of a periodic origami array
+# Stage 2 in the origami pipeline (after structural folding)
+# Requires ANSYS Electronics Desktop (HFSS)
+
+problem:
+  name: "origami_emi_shield"
+  physics: "coupled"
+
+hfss:
+  start_instance: true
+  aedt_version: "2025.2"
+  non_graphical: true         # REQUIRED for automated runs
+  port: 50051
+  desktop_launch_timeout_s: 600
+
+  project_name: "origami_emi"
+  design_name:  "hfss_unit_cell"
+
+  geometry:
+    source: "stl"
+    stl_path: null   # Set to deformed_geometry.stl from structural stage
+
+  materials_em:
+    - name: "copper"
+      conductivity_S_m: 5.8e7
+
+  boundaries:
+    type: "floquet"           # infinite periodic array
+    n_floquet_modes: 8        # covers up to ~18 GHz for 20mm cell
+    air_gap_lambda: 0.25      # λ/4 clearance above/below structure
+
+  setup:
+    solution_type: "DrivenModal"
+    adaptive_passes: 6
+    max_delta_s: 0.01
+    sweep_type: "Interpolating"
+    freq_start_GHz: 1.0
+    freq_stop_GHz:  20.0
+    n_freq_points: 200
+
+resources:
+  max_ram_mb: 16384
+
+output:
+  dir: "outputs/em_shielding"

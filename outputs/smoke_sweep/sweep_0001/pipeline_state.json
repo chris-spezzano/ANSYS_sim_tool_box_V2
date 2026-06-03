@@ -1,0 +1,11 @@
+{
+  "status": "COMPLETE",
+  "stages_done": [
+    "sweep"
+  ],
+  "timings_s": {
+    "sweep": 0.0
+  },
+  "failed_stage": null,
+  "error": null
+}

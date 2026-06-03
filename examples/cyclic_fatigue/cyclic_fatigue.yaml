@@ -1,0 +1,59 @@
+# cyclic_fatigue.yaml — Cyclic loading fatigue analysis
+# Uses Chaboche nonlinear kinematic hardening for realistic hysteresis loops
+# Material: Copper (typical for origami EMI sheets)
+
+problem:
+  name: "cyclic_fatigue_copper"
+  physics: "structural"
+
+mapdl:
+  start_instance: true
+  port: 50052
+  ram_mb: 2048
+
+geometry:
+  source: "parametric"
+  plate:
+    width_m:  0.020
+    height_m: 0.020
+    depth_m:  0.001       # 1 mm thick copper sheet
+    hole_radius_m: 0.002
+
+elements:
+  type: "SOLID185"
+  keyopt: {k2: 1}         # reduced integration for large plastic strain
+
+materials:
+  - mat_id: 1
+    name: "copper"
+    model: "chaboche"
+    E_Pa:           110.0e9
+    nu:             0.35
+    density_kg_m3:  8960.0
+    chaboche:
+      yield_stress_Pa: 70.0e6    # annealed copper σ_y ≈ 70 MPa
+      C: [25000.0e6, 5000.0e6]   # two backstress terms
+      gamma: [500.0, 50.0]
+      Q_Pa: 25.0e6               # saturated isotropic hardening
+      b: 10.0
+
+bcs:
+  constraints:
+    - {type: "fixed", axis: "X", side: "min", dofs: ["ALL"]}
+  loads:
+    - {type: "pressure", axis: "X", side: "max", value_Pa: -50.0e6}
+
+solver:
+  type: "static"
+  nlgeom: true
+  nsubst: {initial: 50, max: 500, min: 5}
+  autots: true
+  nropt: "FULL"
+  lnsrch: true
+  neqit: 30
+  cnvtol_force: 0.005
+
+output:
+  dir: "outputs/cyclic_fatigue"
+  export_csv: true
+  save_screenshots: true

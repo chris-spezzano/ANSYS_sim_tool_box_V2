@@ -1,0 +1,242 @@
+# ============================================================
+# ANSYS Simulation Toolbox — Master Configuration
+# ============================================================
+# This file is the single source of truth for every parameter.
+# Change a value here and re-run; all modules will pick it up.
+# Every setting is documented with its physical meaning.
+
+# ────────────────────────────────────────────────────────────
+# PROBLEM DESCRIPTION
+# ────────────────────────────────────────────────────────────
+problem:
+  name: "plate_with_hole"            # Human-readable run label
+  physics: "structural"              # structural | thermal | harmonic | coupled
+  # Dimensions: 2 for plane-stress/plane-strain models, 3 for full solids
+  spatial_dim: 3
+
+# ────────────────────────────────────────────────────────────
+# MAPDL CONNECTION
+# Change port if another MAPDL instance is already running on 50052.
+# Increase ram_mb if you see "Insufficient memory" in the solver log.
+# nproc > 1 requires an ANSYS HPC license.
+# ────────────────────────────────────────────────────────────
+mapdl:
+  start_instance: true              # false = connect to a running instance
+  port: 50052
+  jobname: "ams_run"
+  run_location: null                # null = OS temp dir; set absolute path to keep files
+  ram_mb: 2048                      # working memory; rule of thumb: 8–16 × mesh_size (MB)
+  nproc: 1                          # cores for parallel solve; 1 for single-license
+  loglevel: "WARNING"               # ERROR | WARNING | INFO | DEBUG
+  # PyMAPDL 0.73 bug: always use absolute paths — relative paths silently fail
+  override_no_gui: true             # suppress ANSYS GUI (headless mode)
+
+# ────────────────────────────────────────────────────────────
+# GEOMETRY
+# ────────────────────────────────────────────────────────────
+geometry:
+  source: "parametric"              # parametric | cdb | stl | step
+  cdb_path: null                    # used when source == cdb; must be absolute
+  stl_path: null                    # used when source == stl
+
+  # Parametric plate-with-hole geometry (used when source == parametric)
+  plate:
+    width_m:  0.10                  # plate width along X (m)
+    height_m: 0.10                  # plate height along Y (m)
+    depth_m:  0.005                 # thickness along Z (for 3D solid)
+    hole_radius_m: 0.010            # circular hole radius; must be < width/2 and height/2
+    # Theoretical stress concentration factor for a circular hole in a wide plate:
+    # Kt = 3.0 (uniaxial tension, hole << plate width); rises to ~5 for hole/width > 0.3
+
+# ────────────────────────────────────────────────────────────
+# MESH
+# ────────────────────────────────────────────────────────────
+mesh:
+  global_esize_m: 0.005             # global element size (m); refine around hole
+  hole_refinement_factor: 0.25      # elements near hole = esize × factor (finer)
+  # Quality thresholds — meshes outside these limits fail the pre-solve gate
+  quality_thresholds:
+    aspect_ratio_max: 20.0          # longest edge / shortest edge; < 10 is ideal
+    jacobian_min: 0.0               # negative Jacobian = inverted element (always fatal)
+    warping_max_deg: 30.0           # deviation from flat plane (shell/2D elements only)
+
+# ────────────────────────────────────────────────────────────
+# ELEMENTS
+# ────────────────────────────────────────────────────────────
+elements:
+  # Choose element family based on geometry type:
+  #   plane182  — 2D quad (plane stress, plane strain, axisymmetric); fast, reliable
+  #   plane183  — 2D midside-node quad (higher accuracy, ~3× more DOFs)
+  #   solid185  — 3D hex8 (most robust; good for large deformation)
+  #   solid186  — 3D hex20 (accurate; required when stress gradients are steep)
+  #   solid187  — 3D tet10 (auto-meshable; use when geometry is complex)
+  #   shell181  — 4-node shell (thin structures; large rotation capable)
+  #   shell281  — 8-node shell (higher accuracy; do NOT use above ~20° rotation)
+  #   beam188   — 2-node Timoshenko beam (all section types; large deformation)
+  type: "solid186"
+  keyopt:
+    # SOLID186 KEYOPT(2): full integration (0, default) vs reduced integration (1)
+    # Full integration avoids hourglass modes but is slower.
+    k2: 0                           # 0 = full integration (recommended for nonlinear)
+
+# ────────────────────────────────────────────────────────────
+# MATERIALS
+# Each entry defines one material. mat_id is the MAPDL material number (1-based).
+# Mixing units: this toolbox uses SI (Pa, m, kg, s, K) throughout.
+# ────────────────────────────────────────────────────────────
+materials:
+  - mat_id: 1
+    name: "structural_steel"
+    model: "elastic"                # elastic | bilinear_plastic | chaboche | damage | usermat
+    # Elastic properties
+    E_Pa: 200.0e9                   # Young's modulus (Pa)
+    nu: 0.30                        # Poisson's ratio (dimensionless; 0.25–0.35 for metals)
+    density_kg_m3: 7850.0           # mass density (kg/m³); needed for modal and dynamic solves
+    # Thermal properties (needed when physics includes temperature)
+    thermal:
+      conductivity_W_mK: 50.0       # thermal conductivity λ (W/m·K)
+      specific_heat_J_kgK: 500.0    # specific heat Cp (J/kg·K)
+      cte_1_K: 12.0e-6              # coefficient of thermal expansion α (1/K)
+
+  # Uncomment to add an elastic-plastic material:
+  # - mat_id: 2
+  #   name: "aluminum_6061"
+  #   model: "bilinear_plastic"
+  #   E_Pa: 69.0e9
+  #   nu: 0.33
+  #   density_kg_m3: 2700.0
+  #   plasticity:
+  #     yield_stress_Pa: 276.0e6    # initial yield stress σ_y0
+  #     tangent_modulus_Pa: 690.0e6 # plastic tangent modulus E_T = dσ/dε_plastic
+  #     # Linear isotropic hardening: σ_y = σ_y0 + E_T * ε_p
+
+  # Uncomment to use a USERMAT (custom Fortran material):
+  # - mat_id: 3
+  #   name: "my_custom_material"
+  #   model: "usermat"
+  #   dll_path: "usermat/build/usermat.dll"   # absolute path to compiled .dll/.so
+  #   n_state_vars: 12              # must match NSTATV in your Fortran subroutine
+
+# ────────────────────────────────────────────────────────────
+# BOUNDARY CONDITIONS
+# ────────────────────────────────────────────────────────────
+bcs:
+  # Support: fully clamp the left face (x = 0)
+  constraints:
+    - type: "displacement"
+      location: "face"
+      axis: "x"                     # select face at minimum x
+      side: "min"
+      dofs: ["UX", "UY", "UZ"]      # constrain all translation DOFs
+      value: 0.0                    # zero displacement = fixed
+
+  # Load: uniform tensile traction on the right face (x = width)
+  loads:
+    - type: "pressure"
+      location: "face"
+      axis: "x"
+      side: "max"
+      value_Pa: -100.0e6            # negative = tensile traction (Pa)
+      # Physical meaning: σ_far = 100 MPa; stress at hole edge ≈ Kt × 100 = 300 MPa
+
+# ────────────────────────────────────────────────────────────
+# SOLVER
+# ────────────────────────────────────────────────────────────
+solver:
+  type: "static"                    # static | modal | harmonic | transient | buckling
+  nlgeom: false                     # true = large deformation (geometric nonlinearity)
+                                    # required when displacements > ~5% of dimensions
+  nsubsteps: 1                      # load substeps; >1 for nonlinear/large-load problems
+  autots: true                      # automatic time stepping (bisection on divergence)
+  nropt: "FULL"                     # Newton-Raphson variant: FULL (default) | MODI | INIT
+  lnsrch: true                      # line search: improves convergence for nonlinear
+
+  # Retry ladder: if solve diverges, escalate through these levels
+  # Level 1: standard NR + autots bisection (default)
+  # Level 2: + STABILIZE (artificial damping to pass local instabilities)
+  # Level 3: + ARCLEN (arc-length for snap-through or limit points)
+  # Level 4: two-stage load split (solve to 50%, restart to 100%)
+  retry:
+    enabled: true
+    max_level: 4
+    stabilize_energy_ratio: 0.05   # AENE/SENE < 5% = acceptable artificial energy
+
+  # Modal-specific settings (only used when type == modal)
+  modal:
+    n_modes: 10                    # number of natural frequencies to extract
+    freq_range_Hz: [0.0, 10000.0]  # frequency range to search
+
+  # Harmonic-specific settings (only used when type == harmonic)
+  harmonic:
+    freq_start_Hz: 10.0
+    freq_end_Hz: 1000.0
+    n_substeps: 100                # number of frequency points
+    damping_ratio: 0.02            # ξ = 0.02 (2% critical damping, typical for metals)
+
+# ────────────────────────────────────────────────────────────
+# HFSS (ELECTROMAGNETIC)
+# Requires ANSYS Electronics Desktop (AEDT) license.
+# ────────────────────────────────────────────────────────────
+hfss:
+  start_instance: true
+  aedt_version: "2024.1"           # must match installed AEDT version
+  non_graphical: true              # headless mode (no GUI window)
+  port: 50051                      # gRPC port
+  desktop_launch_timeout_s: 600    # wait up to 10 min for license checkout
+
+  project_name: "ams_hfss"
+  design_name: "hfss_design"
+
+  geometry:
+    source: "stl"                  # box | stl | step
+    stl_path: null                 # absolute path to geometry STL (from structural solve)
+
+  materials_em:
+    # EM material properties (separate from mechanical; used by HFSS only)
+    - name: "copper"
+      conductivity_S_m: 5.8e7      # σ (S/m)
+    - name: "substrate"
+      permittivity: 4.4            # ε_r (relative permittivity)
+      loss_tangent: 0.02           # tan δ (dielectric loss)
+
+  boundaries:
+    type: "floquet"                # floquet (periodic unit cell) | radiation (free-space)
+    # Floquet BCs assume the structure tiles infinitely in the XY plane.
+    # radiation BCs treat it as an isolated scatterer with an absorbing outer boundary.
+    n_floquet_modes: 8             # number of Floquet modes to include (8 covers up to ~18 GHz)
+    air_gap_lambda: 0.25           # air box extends λ/4 above/below the structure
+
+  setup:
+    solution_type: "DrivenModal"   # DrivenModal (S-params) | DrivenTerminal | EigenMode
+    adaptive_passes: 6             # HFSS refines mesh up to this many times
+    max_delta_s: 0.01              # mesh refinement stops when ΔS < 1% between passes
+    sweep_type: "Interpolating"    # Interpolating (fast) | Discrete (slow, exact)
+    freq_start_GHz: 1.0
+    freq_stop_GHz:  20.0
+    n_freq_points: 200
+
+# ────────────────────────────────────────────────────────────
+# COMPUTATIONAL RESOURCES
+# ────────────────────────────────────────────────────────────
+resources:
+  license_server: null              # null = use default FLEXlm env variable ANSYSLMD_LICENSE_FILE
+  # RAM budget
+  max_ram_mb: 16384                 # hard cap; solver will fail cleanly rather than OOM
+  # CPU allocation
+  max_nproc: 4                      # max parallel processes; each needs an HPC license token
+  # GPU (requires ANSYS GPU Accelerator license)
+  use_gpu: false
+  # Job queuing (set to true when submitting to HPC cluster)
+  hpc_mode: false
+  scheduler: "none"                 # none | pbs | slurm | lsf
+
+# ────────────────────────────────────────────────────────────
+# OUTPUT
+# ────────────────────────────────────────────────────────────
+output:
+  dir: "outputs"                    # relative to toolbox root
+  save_screenshots: true
+  screenshot_dpi: 150
+  export_vtk: true                  # save mesh + results as VTK for ParaView
+  export_csv: true                  # save nodal results as CSV
+  export_hdf5: true                 # save full field data (for post-coupling)

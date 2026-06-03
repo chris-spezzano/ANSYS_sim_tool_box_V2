@@ -1,0 +1,71 @@
+# origami_folding.yaml — Large-deformation waterbomb origami folding
+# Import mesh from nTopology CDB, fold to target angle using SHELL181
+# Precedes HFSS EM simulation in the full pipeline
+
+problem:
+  name: "waterbomb_origami_45deg"
+  physics: "structural"
+
+mapdl:
+  start_instance: true
+  port: 50052
+  ram_mb: 4096
+  nproc: 1
+  loglevel: "WARNING"
+
+geometry:
+  source: "cdb"
+  cdb_path: null   # Set to absolute path: "D:/Projects/.../origami_mesh.cdb"
+
+mesh:
+  quality_thresholds:
+    aspect_ratio_max: 20.0
+    jacobian_min: 0.0
+    warping_max_deg: 30.0
+
+elements:
+  type: "SHELL181"    # CRITICAL: nTop exports SOLID185; must reassign to SHELL181
+  keyopt:
+    k1: 0             # reduced integration + hourglass control
+    k3: 0             # membrane + bending
+  section_thickness_m: 0.001  # 1 mm copper sheet
+
+materials:
+  - mat_id: 1
+    name: "copper_sheet"
+    model: "bilinear_plastic"
+    E_Pa:          110.0e9
+    nu:            0.35
+    density_kg_m3: 8960.0
+    plasticity:
+      yield_stress_Pa:  70.0e6
+      tangent_modulus_Pa: 1.1e9   # 1% of E
+
+bcs:
+  # Fold the origami by applying rotations at fold lines
+  # In practice: use displacement BCs on crease nodes
+  constraints:
+    - {type: "fixed", axis: "X", side: "min", dofs: ["UX", "UY", "UZ"]}
+    - {type: "fixed", axis: "Y", side: "min", dofs: ["UY"]}
+  loads:
+    - {type: "displacement", axis: "Z", side: "max", dofs: ["UZ"], value: 0.005}
+
+solver:
+  type: "static"
+  nlgeom: true          # large-deformation required for origami
+  nsubst: {initial: 200, max: 1000, min: 20}
+  autots: true
+  nropt: "FULL"
+  lnsrch: true
+  neqit: 30
+  cnvtol_force: 0.005
+  retry:
+    enabled: true
+    max_level: 3
+
+output:
+  dir: "outputs/origami_folding"
+  export_csv: true
+  export_vtk: true
+  save_screenshots: true
+  deform_scale: 1.0     # actual displacements (no exaggeration for large-deform)
