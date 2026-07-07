@@ -118,148 +118,118 @@ def assign_radiation_boundary(hfss, air_box_name: str, name: str = "Radiation") 
     log.info("Radiation boundary '%s' assigned to '%s'", name, air_box_name)
 
 
-def assign_floquet_port(
+def assign_floquet_ports(
     hfss,
-    face_id_or_name: str | int,
     air_box_name: str,
-    n_modes: int = 8,
-    freq_range_GHz: tuple[float, float] = (1.0, 20.0),
-    theta_incidence_deg: float = 0.0,
-    phi_incidence_deg: float = 0.0,
-    name: str = "FloquetPort",
-) -> None:
-    """Assign Floquet ports to the top and bottom faces of the air box.
+    propagation_axis: str = "Z",
+    n_modes: int = 2,
+    name_prefix: str = "FloquetPort",
+) -> tuple[str, str]:
+    """Assign a Floquet port to EACH of the two air-box faces normal to
+    propagation_axis (e.g. top and bottom, for the default Z axis) -- a
+    single create_floquet_port() call only ever assigns ONE port, so a
+    Floquet-port pair (required for any S11/S21 transmission measurement)
+    needs two separate calls. Confirmed against the installed PyAEDT 1.1.0
+    API directly (this session): the real Hfss.create_floquet_port()
+    signature takes assignment/modes/name/reporter_filter/deembed_distance
+    -- NOT the assignment/nummodes/reportfilter/deembedding names an earlier
+    version of this function used, which do not exist on this class and
+    would raise TypeError if called.
+
+    lattice_origin/lattice_a_end/lattice_b_end are computed explicitly here
+    (NOT left at the PyAEDT default of None) using the SAME A/B convention
+    for both faces. Confirmed this session that leaving both at None lets
+    each face auto-detect its own lattice vectors independently, and AEDT's
+    own design validation then rejects the pair with "Your problem setup
+    includes two Floquet Ports ... They are required to have the same
+    lattice coordinate systems and phase delays" -- the auto-detected A/B
+    sense differs between the two faces (they face opposite normals) even
+    though the unit cell itself is a simple rectangle.
 
     Floquet ports model plane wave excitation of an infinite periodic array.
-    They are ALWAYS used in pairs (one on each side of the unit cell along
-    the propagation direction, typically ±Z).
-
-    Parameters
-    ----------
-    theta_incidence_deg : float
-        Polar angle of incidence (0° = normal incidence).
-    phi_incidence_deg : float
-        Azimuthal angle of incidence.
-    n_modes : int
-        Number of Floquet modes.  8 covers up to ~18 GHz for a 20 mm cell.
-        Rule: n_modes should include all modes with |k_t| < k₀ at the highest freq.
-
-    Mode naming convention
-    ----------------------
-    Mode 1: TE(0,0) — normally incident TE plane wave
-    Mode 2: TM(0,0) — normally incident TM plane wave
-    Higher modes: evanescent (decay away from the port)
+    Mode 1: TE(0,0) (normally incident TE plane wave); mode 2: TM(0,0).
+    Higher modes are evanescent. n_modes=2 (just the fundamental pair) is
+    enough whenever the unit cell is well below lambda/2 at the frequency of
+    interest, so no higher-order Floquet mode actually propagates -- check
+    this for your own geometry/frequency before trusting n_modes=2 elsewhere.
 
     S-parameters convention
     -----------------------
-    S11 = reflection coefficient (Floquet port 1, mode 1)
-    S21 = transmission coefficient (Floquet port 1 → port 2, mode 1)
-    SE (shielding effectiveness) = -20 log₁₀|S21| dB
+    S11 = reflection coefficient (port 1, mode 1)
+    S21 = transmission coefficient (port 1 -> port 2, mode 1)
+    SE (shielding effectiveness) = -20 log10|S21| dB
+
+    Returns (port1_name, port2_name).
+    """
+    axis_idx = {"X": 0, "Y": 1, "Z": 2}[propagation_axis.upper()]
+    u_idx, v_idx = [i for i in range(3) if i != axis_idx]
+    # hfss.modeler[name] (Modeler3D.__getitem__) is the confirmed-working
+    # object-by-name lookup for this PyAEDT version -- a "objects.get(name)"
+    # variant tried earlier returned None silently instead of raising,
+    # masking the real bug until the .faces access below failed instead.
+    air_box = hfss.modeler[air_box_name]
+    faces_sorted = sorted(air_box.faces, key=lambda f: f.center[axis_idx])
+    lo_face, hi_face = faces_sorted[0], faces_sorted[-1]
+
+    # Build identical-convention A/B lattice vectors for both faces (same
+    # u/v half-extents, same vertex traversal order) -- see docstring for
+    # why leaving these at PyAEDT's auto-detect default fails validation.
+    u_vals = [v.position[u_idx] for v in hi_face.vertices]
+    v_vals = [v.position[v_idx] for v in hi_face.vertices]
+    u_lo, u_hi = min(u_vals), max(u_vals)
+    v_lo, v_hi = min(v_vals), max(v_vals)
+
+    def _lattice_points(face):
+        origin, a_end, b_end = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+        z = face.center[axis_idx]
+        for pt in (origin, a_end, b_end):
+            pt[axis_idx] = z
+        origin[u_idx], origin[v_idx] = u_lo, v_lo
+        a_end[u_idx], a_end[v_idx] = u_hi, v_lo
+        b_end[u_idx], b_end[v_idx] = u_lo, v_hi
+        return origin, a_end, b_end
+
+    port1_name, port2_name = f"{name_prefix}1", f"{name_prefix}2"
+    try:
+        for face, port_name in ((hi_face, port1_name), (lo_face, port2_name)):
+            origin, a_end, b_end = _lattice_points(face)
+            hfss.create_floquet_port(
+                assignment=face, modes=n_modes, name=port_name,
+                reporter_filter=True, deembed_distance=0,
+                lattice_origin=origin, lattice_a_end=a_end, lattice_b_end=b_end,
+            )
+        log.info("Floquet ports '%s'/'%s' assigned on +/-%s faces, %d modes each",
+                 port1_name, port2_name, propagation_axis, n_modes)
+    except Exception as exc:
+        log.error("Failed to assign Floquet ports on '%s': %s", air_box_name, exc)
+        raise
+    return port1_name, port2_name
+
+
+def assign_periodic_lattice_pairs(hfss, air_box_name: str) -> list[str]:
+    """Assign periodic (lattice-pair) boundary conditions to an air box's
+    lateral faces via Hfss.auto_assign_lattice_pairs() -- the real PyAEDT
+    1.1.0 method (confirmed this session). An earlier version of this
+    function called hfss.assign_master_slave(...), which does not exist on
+    this class (the "master/slave" terminology was renamed to "lattice
+    pair"); that call would have raised AttributeError immediately.
+
+    auto_assign_lattice_pairs auto-detects the periodic face pairs from the
+    object's geometry (XY coordinate plane by default) -- simpler and less
+    error-prone than manually identifying and pairing individual faces.
     """
     try:
-        hfss.create_floquet_port(
-            assignment   = air_box_name,
-            deembedding  = 0,
-            nummodes     = n_modes,
-            reportfilter = True,
-            name         = name,
-        )
-        log.info(
-            "Floquet port '%s': %d modes, θ=%.1f°, φ=%.1f°",
-            name, n_modes, theta_incidence_deg, phi_incidence_deg,
-        )
+        names = hfss.auto_assign_lattice_pairs(assignment=air_box_name)
+        log.info("Periodic lattice-pair BCs assigned on '%s': %s", air_box_name, names)
+        return names
     except Exception as exc:
-        log.error("Failed to assign Floquet port '%s': %s", name, exc)
+        log.error("Failed to assign periodic lattice-pair BC on '%s': %s", air_box_name, exc)
         raise
 
 
-def assign_periodic_master_slave(
-    hfss,
-    master_face: str,
-    slave_face:  str,
-    axis:        str = "X",
-    uv_face:     str | None = None,
-    name_prefix: str = "Periodic",
-) -> None:
-    """Assign periodic master-slave boundary conditions.
-
-    Used with Floquet ports for infinite periodic arrays.  The slave face
-    fields are constrained to equal the master face fields with a phase shift:
-        E_slave(r) = E_master(r - L) × exp(-j k_t · L)
-
-    Parameters
-    ----------
-    master_face : str
-        Name of the master boundary face (typically at x = 0).
-    slave_face : str
-        Name of the slave boundary face (typically at x = L_x).
-    axis : str
-        Periodicity direction ('X', 'Y', or 'Z').
-    """
-    try:
-        hfss.assign_master_slave(
-            master_entity = master_face,
-            slave_entity  = slave_face,
-            master_name   = f"{name_prefix}_Master",
-            slave_name    = f"{name_prefix}_Slave",
-        )
-        log.info(
-            "Periodic BC: master='%s' ↔ slave='%s' along %s",
-            master_face, slave_face, axis,
-        )
-    except Exception as exc:
-        log.error("Failed to assign periodic BC: %s", exc)
-        raise
-
-
-def auto_assign_periodic_from_bounding_box(
-    hfss,
-    air_box_name: str,
-    axis: str = "X",
-    tol_m: float = 1e-6,
-) -> None:
-    """Automatically detect and assign periodic BCs based on the air box bounding box.
-
-    Finds the two faces of the air box orthogonal to 'axis' and assigns
-    master-slave periodic BCs between them.  This is the standard setup for
-    unit-cell Floquet analysis.
-
-    Worked example (from origami EMI workflow)
-    ------------------------------------------
-    Air box: [0, L_x] × [0, L_y] × [z_min, z_max]
-    Periodic in X: master at x=0, slave at x=L_x
-    Periodic in Y: master at y=0, slave at y=L_y
-    Result: simulates an infinite 2D periodic array of unit cells
-    """
-    try:
-        air_box = hfss.modeler.objects.get(air_box_name)
-        if air_box is None:
-            raise ValueError(f"Air box object '{air_box_name}' not found in HFSS model")
-
-        bb = air_box.bounding_box  # [xmin, ymin, zmin, xmax, ymax, zmax]
-        ax_idx = {"X": 0, "Y": 1, "Z": 2}[axis.upper()]
-
-        faces = list(air_box.faces)
-        face_coords = []
-        for face in faces:
-            center = face.center
-            face_coords.append((center[ax_idx], face))
-
-        face_coords.sort(key=lambda x: x[0])
-
-        if len(face_coords) < 2:
-            raise ValueError(f"Could not find two faces along axis {axis}")
-
-        master_face = face_coords[0][1]
-        slave_face  = face_coords[-1][1]
-
-        assign_periodic_master_slave(
-            hfss,
-            master_face = str(master_face.id),
-            slave_face  = str(slave_face.id),
-            axis        = axis,
-        )
-
-    except Exception as exc:
-        log.error("Auto periodic BC assignment failed: %s", exc)
-        raise
+# auto_assign_periodic_from_bounding_box() removed -- it duplicated, less
+# reliably, what assign_periodic_lattice_pairs() already does by calling
+# PyAEDT's own Hfss.auto_assign_lattice_pairs() directly. It also called the
+# now-removed assign_periodic_master_slave(), which itself called a
+# nonexistent hfss.assign_master_slave() method -- this function could never
+# have actually run successfully against the installed PyAEDT 1.1.0 API.

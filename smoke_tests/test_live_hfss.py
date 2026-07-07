@@ -90,7 +90,7 @@ def test_live_hfss_box():
     with open(cfg_path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
 
-    aedt_version = cfg.get("hfss", {}).get("aedt_version", "2025.2")
+    aedt_version = cfg.get("hfss", {}).get("aedt_version", "2025.1")
     project_path = str(PROJECT_DIR / f"{PROJECT_NAME}.aedt")
 
     hfss = None

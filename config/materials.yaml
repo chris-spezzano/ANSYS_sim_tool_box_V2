@@ -1,0 +1,337 @@
+# Central material property library for ansys_sim_toolbox.
+#
+# Each top-level entry under `materials:` is a self-contained material definition,
+# organized by physics domain. An experiment config (e.g. config/fold_test.yaml)
+# references a material by name:
+#
+#   material:
+#     ref: aluminum_6061_T6
+#
+# `ams.materials.library.resolve_material_config()` loads this file and flattens
+# the referenced entry into the shape consumed directly by the structural pipeline
+# (fold_test/geometry.py, fold_test/quasistatic.py, fold_test/fatigue.py,
+# fold_test/lcf.py): {name, model, E_Pa, nu, density_kg_m3, biso, chaboche, fatigue,
+# thermal, electromagnetic}.
+#
+# Sections:
+#   mechanical      - linear-elastic properties. Used by every pipeline (structural,
+#                      thermal, EM modal) for stiffness/mass/wave-speed.
+#   plasticity      - nonlinear structural model selection + parameters.
+#                      Consumed by fold_test/geometry.py (_assign_material) and
+#                      fold_test/quasistatic.py (_apply_material) to define the MAPDL
+#                      material model (TB,BISO / TB,CHABOCHE).
+#   fatigue         - Coffin-Manson / Morrow / SWT strain-life coefficients plus the
+#                      ultimate tensile strength (Su_Pa). Consumed by fold_test/lcf.py
+#                      and fold_test/fatigue.py for LCF post-processing.
+#   thermal         - NOT YET WIRED UP by any pipeline in this repo. Placeholder for
+#                      the thermomechanical pipeline (origami_emi_workflow); populate
+#                      and verify when that integration happens.
+#   electromagnetic - NOT YET WIRED UP by any pipeline in this repo. Placeholder for
+#                      the HFSS Floquet sweep (origami_emi_workflow); populate and
+#                      verify when that integration happens.
+
+materials:
+
+  aluminum_6061_T6:
+    description: >
+      Aluminum 6061-T6 sheet, used for the single-crease fold coupon
+      (fold_test/). Source: typical handbook values; BISO/Chaboche and
+      strain-life coefficients carried over from the original
+      config/fold_test.yaml inline material block.
+
+    mechanical:
+      E_Pa:           70.0e9    # Young's modulus (Pa)
+      nu:             0.33      # Poisson's ratio
+      density_kg_m3:  2700.0    # mass density (kg/m^3)
+
+    plasticity:
+      # model selects which hardening law fold_test/geometry.py & quasistatic.py
+      # configure in MAPDL: elastic | bilinear_plastic | chaboche
+      model: bilinear_plastic
+
+      # Bilinear isotropic hardening (TB,BISO) — used when model=bilinear_plastic
+      biso:
+        yield_stress_Pa:    275.0e6   # initial yield stress (Pa)
+        tangent_modulus_Pa:   0.7e9   # post-yield tangent modulus (~1% of E for 6061-T6)
+
+      # Chaboche nonlinear kinematic hardening (TB,CHABOCHE) — used when model=chaboche
+      chaboche:
+        yield_stress_Pa:  275.0e6
+        C1_Pa:  50.0e9
+        gamma1: 500.0
+        C2_Pa:   5.0e9
+        gamma2:  50.0
+        R_inf_Pa: 50.0e6   # nonlinear isotropic saturation stress
+        b_rate:   10.0     # nonlinear isotropic hardening rate
+
+    fatigue:
+      # Coffin-Manson / Morrow / SWT strain-life coefficients (fold_test/lcf.py)
+      sigma_f_prime_Pa: 455.0e6   # fatigue strength coefficient
+      b_exponent:       -0.10     # fatigue strength exponent
+      eps_f_prime:       0.22     # fatigue ductility coefficient
+      c_exponent:       -0.52     # fatigue ductility exponent
+      Su_Pa:            310.0e6   # ultimate tensile strength (Goodman/Gerber mean-stress correction)
+
+    thermal:
+      # NOT YET USED — placeholder for the thermomechanical pipeline.
+      # Typical 6061-T6 values; verify before use.
+      conductivity_W_mK:  167.0     # thermal conductivity (W/m-K)
+      specific_heat_J_kgK: 896.0    # specific heat (J/kg-K)
+      cte_per_K:          23.6e-6   # coefficient of thermal expansion (1/K)
+      ref_temp_C:          22.0     # reference (stress-free) temperature (deg C)
+
+    electromagnetic:
+      # NOT YET USED — placeholder for the HFSS Floquet sweep.
+      # Typical 6061-T6 values; verify before use.
+      conductivity_S_m: 2.5e7   # electrical conductivity (S/m)
+      permittivity_r:   1.0     # relative permittivity (metal: not meaningful, kept for schema)
+      loss_tangent:     0.0     # dielectric loss tangent (metal: not meaningful, kept for schema)
+
+  protopasta_cb_pla:
+    description: >
+      Protopasta Carbon-Black (CB) Conductive PLA (~25 wt% CB), FFF/FDM printed
+      dogbone specimens (ASTM D638, June 2026). Full property record and source index:
+        protopasta_cb_pla_material_properties.yaml
+        protopasta_cb_pla_material_sources.md
+      Provenance tags used in comments:
+        [EXP]            directly measured from own Zwick testXpert III tensile tests
+        [EXP-CROSSHEAD]  measured from crosshead displacement; no extensometer;
+                         machine compliance estimated <5% at these force levels
+        [EXP-LCF]        from in-house displacement-controlled LCF tests
+                         (D:\Projects\Damage Constitutive Law)
+        [LIT]            from cited literature; paper and value stated in comment
+        [EST]            engineering estimate; not directly measured
+
+    mechanical:
+      E_Pa:          1.428e9  # [EXP-CROSSHEAD] linear regression 1-2% strain band,
+                              # R2>=0.993 on all three 6/11/2026 specimens.
+                              # T1=1375.6, T2=1451.3, T3=1456.6 MPa -> mean 1427.8 MPa.
+                              # Cross-check: 6/9 specimens (D:\Projects\DCL toolbox) gave
+                              # 1298-1564 MPa (mean ~1453 MPa). Fatigue chord ref: 1660-1770 MPa.
+                              # See extract_modulus_6_11.py for computation.
+      nu:            0.36     # [EST] standard PLA Poisson ratio; not measured on these specimens
+      density_kg_m3: 1260.0   # [EST] estimate for ~25 wt% CB-filled PLA; verify by Archimedes
+
+    plasticity:
+      model: bilinear_plastic
+
+      biso:
+        yield_stress_Pa:    15.0e6   # [EXP-CROSSHEAD] 0.2% offset method, mean of T1 and T3
+                                     # (T2 crossing not detected due to 10N preload seating effect).
+                                     # T1: sigma_y=16.22 MPa at eps_y=1.379%
+                                     # T3: sigma_y=13.87 MPa at eps_y=1.153%
+                                     # Mean: 15.0 MPa. See extract_modulus_6_11.py.
+        tangent_modulus_Pa: 1.121e9  # [EXP-CROSSHEAD] ANSYS TB,BISO C2 total-strain tangent
+                                     # Et = (sigma_UTS - sigma_y) / (eps_UTS - eps_y)
+                                     # T1: 1044.4 MPa, T3: 1196.5 MPa -> mean 1120.5 MPa.
+                                     # NOTE: CB/PLA is nearly elastic to fracture (eps_plastic<0.5%);
+                                     # bilinear is a rough approximation. Multilinear (TB,MISO)
+                                     # from the full sigma-eps curve would be more accurate.
+
+      chaboche:
+        yield_stress_Pa:  15.0e6  # [EXP-CROSSHEAD] same source as biso
+        C1_Pa:    0.0             # not calibrated
+        gamma1:   0.0
+        C2_Pa:    0.0
+        gamma2:   0.0
+        R_inf_Pa: 0.0
+        b_rate:   0.0
+
+    lemaitre_cdm:
+      # [EXP-LCF] Re-calibrated 2026-06-19: D(p) = c*max(p-p_D,0)^m fit to the
+      # UNTAPED 2.0% specimens ONLY (data1_T2_2pct, data1_T4_2pct, data2_T3_2pct;
+      # n=3 specimens, 1800 pooled cycle-level points). Every resistance-channel
+      # specimen in this project required grip tape for electrical isolation,
+      # which inflates apparent strain (crosshead-only, no extensometer) and
+      # therefore p_D -- pooling taped+untaped together drops pooled R2 to 0.24;
+      # untaped-only pooling recovers R2=0.97. See model_summary_and_next_steps.md
+      # SS3 for the full tape-confound finding and offset-calibration attempt.
+      p_D_pct: 0.2007    # [EXP-LCF] damage initiation threshold, untaped 2.0% pooled
+      c:        2.0475   # [EXP-LCF] amplitude coefficient, untaped 2.0% pooled
+      m:        0.2079   # [EXP-LCF] power exponent, untaped 2.0% pooled
+      R2:       0.9728
+      per_specimen_p_D_pct: [0.1660, 0.1693, 0.1546]   # data1_T2, data1_T4, data2_T3
+      ratcheting_law:
+        # [EXP-LCF] p_accum(N) = A*N^q, pooled log-log fit, same 3 untaped 2.0%
+        # specimens (n=2076 points). Per-specimen exponents range 1.09-3.97 --
+        # real population scatter, not noise; treat this pooled law as a
+        # representative central trend only. Primary mechanism for cycle-count
+        # extrapolation (compose with lemaitre_cdm above to get D(N)); the
+        # Basquin fatigue block below is a documented fallback/cross-check only.
+        A: 0.011389
+        q: 0.5067
+        note: >
+          CB/PLA cycles nearly elastically at 2% strain (Coffin-Manson plastic
+          term ~0), so this empirical ratcheting law -- not classical strain-life
+          theory -- is the physically appropriate primary extrapolation method.
+
+    electrical_damage_coupling:
+      # [EXP] sigma_e(D) = sigma_e0*(1-D)^m_e, calibrated this session via
+      # ln(sigma_e/sigma_e0) = m_e*ln(1-D) on matched resistance trials.
+      m_e: 2.0   # [EXP] pooled exponent. CAVEAT: 100% of m_e data is from
+                 # taped (resistance-channel) specimens -- its cross-amplitude
+                 # TREND (2.51 at 2.25% -> 2.15 at 2.0% -> 1.78 at 1.75%) is
+                 # confounded with tape and not currently distinguishable from
+                 # a true amplitude effect. The pooled central value (~2.0) is
+                 # used here as the best available point estimate.
+      sigma_e0_S_m: 3.85e-3   # [LIT] Roumy et al. (2023) geometry: R0=182 ohm,
+                              # A=10x1 mm^2, L=70 mm -> sigma_e0 = L/(R0*A).
+                              # NOT measured on our own specimen geometry --
+                              # recompute from our own R0 if/when available.
+      R0_ohm: 182.0           # [LIT] Roumy et al. (2023), 20 C, P4 print params
+
+    dielectric_ghz:
+      # [LIT] Frequency-dependent complex permittivity of THE SAME material
+      # (Protopasta Conductive PLA, 20wt% CB) directly confirmed in Lee et al.
+      # (2023), Small 19, 2305005, Sec. 4 "Characterization of EM Properties"
+      # (main text: "PLA composite mixed with CB (Conductive PLA, Protopasta)")
+      # -- measured via VNA + WR-90 waveguide kit, Nicolson-Ross extraction,
+      # X-band 8.2-12.4 GHz (Figure S3, Supporting Information). Two
+      # graph-read endpoints, linearly interpolated/extrapolated below:
+      #   f=8.0 GHz:  eps' ~17.7   eps''~24.7   (loss tangent 1.40)
+      #   f=12.4 GHz: eps' ~13.8   eps''~18.7   (loss tangent 1.35, matches
+      #                                          the paper's own stated 1.35)
+      # mu_r = 1 + 0j (CB-PLA is non-magnetic -- stated explicitly in the
+      # paper, Sec. "Impedance Matching of the KF-EMA").
+      eps_prime_8GHz: 17.7
+      eps_prime_12_4GHz: 13.8
+      eps_pp_8GHz: 24.7
+      eps_pp_12_4GHz: 18.7
+      freq_ref_lo_hz: 8.0e+9
+      freq_ref_hi_hz: 12.4e+9
+      mu_r: 1.0
+      extrapolation_warning: >
+        This project operates its EM/Joule model at 1 GHz -- a factor of 8
+        BELOW Lee et al.'s measured X-band floor (8.2 GHz), not interpolation.
+        The linear trend across X-band is the only data available; extending
+        it to 1 GHz assumes no relaxation/percolation feature in the gap
+        (8.2 down to 1 GHz) that the X-band-only measurement cannot rule out.
+        Treat the 1 GHz numbers this produces as a flagged, order-of-magnitude
+        estimate, not a calibrated value -- exactly the same epistemic status
+        as m_k below, and for the same reason (no measurement at the
+        operating frequency exists on file).
+      d_coupling_assumed: true
+      d_coupling_note: >
+        How damage D should couple to eps'' (the GHz dielectric loss
+        mechanism) is NOT established by anything on disk -- the existing
+        m_e=2.0 exponent above was calibrated against DC conductivity
+        (Roumy et al., near-0 Hz), not GHz dielectric loss, and there is no
+        a priori reason the same exponent or even the same functional form
+        governs both (DC conduction through a CB percolation network and
+        GHz interfacial/Maxwell-Wagner polarization loss are physically
+        distinct mechanisms -- see the good-conductor-criterion check in
+        emi_crease_demo_report.md SS9.5). Assumed here, for item 6 parity-
+        check purposes only: eps_pp(D) = eps_pp0*(1-D)^m_e, same exponent,
+        same form as sigma_e(D) -- a working hypothesis, not a measured
+        relationship, flagged exactly like m_k_assumed below.
+
+    thermal_damage_coupling:
+      # k(D) = k0*(1-D)^m_k. m_k CANNOT be calibrated from anything on disk --
+      # confirmed by reading both papers in papers/ in full (model_summary_and_
+      # next_steps.md SS6.2-6.4). Fixed here ONLY for theoretical-demonstration
+      # purposes, explicitly flagged -- do not treat as a measured value.
+      m_k: 2.0
+      m_k_assumed: true
+      m_k_note: >
+        Literature-motivated central guess bracketing the calibrated m_e~2.0,
+        same convention already used in thermal_model_forward.py's M_K_SWEEP.
+        Ambient air convection swamps m_k's observability ~20:1; vacuum
+        improves this only ~11x (radiation still dominates in this lumped
+        geometry). An ambient-only FLIR test would NOT resolve m_k.
+
+    fatigue:
+      # Coffin-Manson / Morrow / SWT strain-life coefficients -- DOCUMENTED
+      # FALLBACK / CROSS-CHECK ONLY for cycle-count extrapolation. The
+      # project's own record (see lemaitre_cdm.ratcheting_law above) shows
+      # CB/PLA cycles nearly elastically, so classical strain-life theory is
+      # not the physically appropriate PRIMARY method here -- it is retained
+      # for the demo's explicit "established theory vs. this project's
+      # calibrated law" comparison plot.
+      sigma_f_prime_Pa: 57.0e6  # [EXP+LIT] Basquin coefficient estimated from:
+                                 # 1 force-controlled fatigue point (N_f=264, sigma_a=10.52 MPa,
+                                 # sigma_mean=12.88 MPa, R=0.101; 65% UTS, June 2026) +
+                                 # Goodman correction using Su=34.6 MPa +
+                                 # b assumed from Jerez-Mesa 2023 neat PLA (b=-0.161).
+                                 # sigma_f_prime = sigma_a / [(2Nf)^b * (1-sigma_m/Su)]
+                                 #               = 10.52 / [528^(-0.161) * 0.628] = 56.8 MPa
+                                 # CAVEAT: single data point; b borrowed from neat PLA.
+                                 # Treat as order-of-magnitude only.
+      b_exponent:       -0.161  # [LIT] Jerez-Mesa et al. 2023 (PMC12787623), smooth YZ neat PLA
+                                 # S-N: sigma_amp = 68.159 * Nf^(-0.161), R2=0.991, R=0.05.
+                                 # Assumed applicable to CB PLA (CB filler shifts amplitude,
+                                 # exponent likely similar). NOT verified for CB grade.
+      eps_f_prime:       0.0    # [N/A] CB/PLA cycles nearly elastically; Coffin-Manson plastic
+                                 # term physically undefined for this material regime.
+                                 # Pipeline will compute zero plastic fatigue contribution.
+      c_exponent:       -0.001  # [N/A] near-zero sentinel; see eps_f_prime note
+      Su_Pa:            34.6e6  # [EXP] mean UTS, n=5 specimens, June 2026
+
+    thermal:
+      # [LIT] Roumy, Touchard, Marchand, Truong Hoang & Martinez-Hergueta (2023),
+      # Int. J. Fatigue 173, 107677 -- identical material (Proto-Pasta CB/PLA
+      # filament source). Measured on UNDAMAGED material; legitimately anchored.
+      # Read in full this session (papers/); their own lambda-vs-cycling data is
+      # the WRONG thing to borrow for m_k (driven by Joule-heating-induced
+      # crystallization, opposite-sign mechanism to mechanical damage) -- see
+      # thermal_damage_coupling above and model_summary_and_next_steps.md SS6.1.
+      conductivity_W_mK:    0.365   # [LIT] Roumy Table 1 (C-THERM TCi), +-0.004
+      specific_heat_J_kgK:  1322.0  # [LIT] Roumy Table 1 (modulated DSC), +-3
+      cte_per_K:            0.0     # not yet obtained
+      ref_temp_C:          22.0
+      density_kg_m3_roumy: 1240.0   # [LIT] Roumy Sec 3.4.2 (their specimen; may
+                                     # differ slightly from our own density_kg_m3 estimate above)
+      h_conv_W_m2K:        18.0     # [LIT] Roumy Table 5, natural convection, ambient air
+      b_heat_per_degC:      2.11e-2 # [LIT] Roumy Eq 3 / Sec 3.4.1, resistance-temperature
+                                     # coefficient (heating); b_cool=1.58e-2 (cooling)
+
+    electromagnetic:
+      # NOT YET WIRED to any pipeline in this repo (closed-form reduced-order EM
+      # is consumed directly by emi_physics/em_reduced_order.py, not via MAPDL).
+      # Resistance data from Beniak et al. 2022 (PMC8877385), ~25 wt% CB PLA, FDM:
+      #   100 mm specimen, 25 deg C: R = 4.82 ohm
+      #   100 mm specimen, 80 deg C: R = 6.85 ohm
+      #   Positive TCR ~ +0.77 %/deg C from 25 to 80 deg C
+      #   (resistance INCREASES with temperature -- typical CB percolation composite)
+      # Bulk conductivity not computed from Beniak (cross-section not stated in
+      # paper); use the Roumy-geometry value below instead (see
+      # electrical_damage_coupling above for provenance and the caveat that it
+      # is NOT measured on our own specimen geometry).
+      conductivity_S_m: 3.85e-3   # [LIT] Roumy et al. (2023) geometry-derived; see
+                                  # electrical_damage_coupling.sigma_e0_S_m above
+      permittivity_r:   1.0
+      loss_tangent:     0.0
+
+  copper:
+    description: >
+      Copper, included as a second example to demonstrate the schema is
+      multi-material-ready. Values gathered from origami_emi_workflow
+      (main/config.py, thermal_study/config.py, fatigue_study/fatigue_config.yaml).
+      NOT YET CONSUMED by any pipeline in this repo.
+
+    mechanical:
+      E_Pa:           117.0e9
+      nu:             0.34
+      density_kg_m3:  8960.0
+
+    plasticity:
+      model: elastic   # no plasticity data gathered yet for copper
+      biso: {}
+      chaboche: {}
+
+    fatigue:
+      sigma_f_prime_Pa: 560.0e6
+      b_exponent:       -0.12
+      eps_f_prime:       0.50
+      c_exponent:       -0.60
+      Su_Pa:            220.0e6   # approximate, annealed copper — verify before use
+
+    thermal:
+      conductivity_W_mK:  385.0
+      specific_heat_J_kgK: 385.0
+      cte_per_K:          16.5e-6
+      ref_temp_C:          22.0
+
+    electromagnetic:
+      conductivity_S_m: 5.8e7
+      permittivity_r:   1.0
+      loss_tangent:     0.0

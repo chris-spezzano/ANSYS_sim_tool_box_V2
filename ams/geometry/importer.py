@@ -24,11 +24,79 @@ Critical nTopology CDB notes (from real debugging)
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
-from typing import Any
+
+import numpy as np
 
 log = logging.getLogger(__name__)
+
+
+def _write_mapdl_cdb(mesh, cdb_path: Path) -> None:
+    """Write a MAPDL-compatible CDB from a meshio Mesh object.
+
+    Format is reverse-engineered from MAPDL's own CDWRITE output so that
+    CDREAD,DB can read it back without errors.  Key differences from naive
+    NBLOCK/EBLOCK writes:
+      - ETBLOCK must precede NBLOCK/EBLOCK
+      - NBLOCK uses (3i9,6e21.13e3) — 9-wide ints, 21-wide E3 floats
+      - EBLOCK uses (19i10) — 10-wide ints; element ID is field 11
+      - Triangles encoded as degenerate quads: n4 = n3
+    """
+    points = mesh.points
+    n_nodes = len(points)
+
+    tri_cells = []
+    for block in mesh.cells:
+        if block.type in ("triangle", "triangle6", "triangle3"):
+            tri_cells.append(block.data)
+    if not tri_cells:
+        for block in mesh.cells:
+            tri_cells.append(block.data)
+
+    connectivity = np.vstack(tri_cells)
+    n_elems = len(connectivity)
+
+    with open(cdb_path, "w", encoding="ascii") as f:
+        f.write("/PREP7\n")
+
+        # ETBLOCK: element type table — must come before EBLOCK.
+        # No NUMOFF: that command offsets INCOMING entity IDs and is only
+        # needed when merging two databases, not creating a fresh mesh.
+        f.write("ETBLOCK,        1,        1\n(2i9,19a9)\n")
+        f.write("        1      181" + "        0" * 19 + "\n       -1\n")
+
+        # NBLOCK: node coordinates — format matches MAPDL CDWRITE output
+        def _fmt21(v: float) -> str:
+            """Format float as exactly 21 chars with 3-digit exponent (e21.13e3)."""
+            s = f"{v:.13E}"                  # e.g. "3.0396947860000E+00"
+            if "E+" in s:
+                m, e = s.split("E+")
+                s = m + "E+" + e.zfill(3)   # → "3.0396947860000E+000" (20 chars)
+            elif "E-" in s:
+                m, e = s.split("E-")
+                s = m + "E-" + e.zfill(3)   # → "3.0396947860000E-000" (20 chars)
+            return f"{s:>21}"               # right-justify to exactly 21 chars
+
+        f.write(f"NBLOCK,6,SOLID,{n_nodes:10d},{n_nodes:10d}\n")
+        f.write("(3i9,6e21.13e3)\n")
+        for i, pt in enumerate(points, start=1):
+            x, y, z = float(pt[0]), float(pt[1]), float(pt[2])
+            f.write(f"{i:9d}{0:9d}{0:9d}{_fmt21(x)}{_fmt21(y)}{_fmt21(z)}\n")
+        f.write("N,UNBL,LOC,       -1,\n")
+
+        # EBLOCK: element connectivity
+        # Fields (10-wide each): mat type real sec esys 0 0 0 npe 0 elem_id n1 n2 n3 n4
+        f.write(f"EBLOCK,19,SOLID,{n_elems:10d},{n_elems:10d}\n")
+        f.write("(19i10)\n")
+        for i, conn in enumerate(connectivity, start=1):
+            n1 = int(conn[0]) + 1
+            n2 = int(conn[1]) + 1
+            n3 = int(conn[2]) + 1
+            row = [1, 1, 1, 1, 0, 0, 0, 0, 4, 0, i, n1, n2, n3, n3]
+            f.write("".join(f"{v:10d}" for v in row) + "\n")
+        f.write("        -1\n")
+
+        f.write("/GO\nFINISH\n")
 
 
 class GeometryImporter:
@@ -89,9 +157,11 @@ class GeometryImporter:
         log.info("Importing CDB: %s", cdb_path)
         self._m.prep7()
 
-        # CDREAD,DB reads nodes, elements, materials, BCs, and loads.
-        # The 'DB' option restores the full database (preferred over 'NOGEOM').
-        self._m.cdread("DB", str(cdb_path), "cdb")
+        # Upload then read via /INPUT (runs NBLOCK/EBLOCK as APDL commands).
+        self._m.upload(str(cdb_path))
+        self._m.input(cdb_path.name)
+        # Re-enter PREP7: our CDB ends with FINISH which drops back to BEGIN level.
+        self._m.prep7()
 
         if nrotat_all:
             # Align all nodal coordinate systems with the global frame so that
@@ -106,6 +176,62 @@ class GeometryImporter:
         n_elems = self._m.mesh.n_elem
         log.info("CDB import complete: %d nodes, %d elements", n_nodes, n_elems)
         print(f"Imported: {n_nodes:,} nodes, {n_elems:,} elements from {cdb_path.name}")
+
+    # ── Abaqus .inp import (nTopology Export FE Mesh output) ─────────────────
+
+    def from_inp(
+        self,
+        inp_path: str | Path,
+        reassign_et: str | None = None,
+        nrotat_all: bool = True,
+    ) -> None:
+        """Import an Abaqus .inp mesh exported by nTopology's Export FE Mesh block.
+
+        nTopology 5.x does not support .cdb export directly — use .inp instead.
+        This method reads the .inp via meshio and writes a MAPDL-compatible CDB
+        (NBLOCK/EBLOCK format) so the rest of the pipeline is unchanged.
+
+        Parameters
+        ----------
+        inp_path : str | Path
+            Absolute or relative path to the .inp file written by nTopology.
+        reassign_et : str | None
+            Element type to reassign after import (e.g., 'SHELL181').
+            nTopology's FE Shell Mesh block writes triangle elements; pass
+            'SHELL181' to ensure MAPDL uses the correct formulation.
+        nrotat_all : bool
+            Align nodal coordinate systems after import (recommended).
+
+        Requires: meshio >= 5.3  (pip install meshio)
+        """
+        try:
+            import meshio
+        except ImportError:
+            raise ImportError(
+                "meshio is required for .inp import.  "
+                "Run: pip install meshio>=5.3"
+            ) from None
+
+        inp_path = Path(inp_path).resolve()
+        if not inp_path.exists():
+            raise FileNotFoundError(f"Abaqus .inp file not found: {inp_path}")
+
+        cdb_path = inp_path.with_suffix(".cdb")
+        log.info("Converting %s → %s (MAPDL CDB)", inp_path.name, cdb_path.name)
+        print(f"Converting {inp_path.name} → {cdb_path.name} ...")
+
+        mesh = meshio.read(str(inp_path))
+        # nTopology exports coordinates in mm; MAPDL structural analysis uses
+        # SI units (m, Pa, kg).  Scale all node coordinates mm → m here so
+        # material properties, section thickness, and BCs stay in consistent
+        # SI units throughout the pipeline.
+        mesh.points = mesh.points * 1e-3
+        _write_mapdl_cdb(mesh, cdb_path)
+
+        log.info("CDB written: %d nodes, %d elements (coords scaled mm→m)",
+                 len(mesh.points), sum(len(b.data) for b in mesh.cells))
+
+        self.from_cdb(cdb_path, reassign_et=reassign_et, nrotat_all=nrotat_all)
 
     # ── STL import (for HFSS / geometry reference) ───────────────────────────
 
@@ -133,7 +259,7 @@ class GeometryImporter:
         log.info("Importing STL geometry: %s", stl_path)
         self._m.prep7()
         # MAPDL can read STL via IGESIN with FACETS option
-        self._m.run(f"/AUX15")
+        self._m.run("/AUX15")
         self._m.run(f"IGESIN,'{stl_path.stem}','{stl_path.suffix.strip('.')}','{stl_path.parent}'")
         self._m.run("/PREP7")
         log.info("STL geometry imported")
@@ -287,7 +413,10 @@ class GeometryImporter:
 
         if keyopt_overrides:
             for k, v in keyopt_overrides.items():
-                m.keyopt(et_id, k, v)
+                # Accept "k1" / "k3" style keys from YAML as well as plain ints
+                knum = int(str(k).lstrip("k") or 0)
+                if knum > 0:
+                    m.keyopt(et_id, knum, v)
 
         if element_type.upper().startswith("SHELL") and section_thickness_m is not None:
             m.sectype(et_id, "SHELL")
@@ -328,10 +457,9 @@ class GeometryImporter:
         m = self._m
         m.post1()
         m.set("LAST")
-        m.run(f"PLNSOL,U,SUM")
+        m.run("PLNSOL,U,SUM")
         # Use PyVista to export deformed mesh as STL
         try:
-            import pyvista as pv
             import numpy as np
 
             mesh   = m.mesh._surf

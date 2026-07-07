@@ -179,7 +179,11 @@ solver:
 # ────────────────────────────────────────────────────────────
 hfss:
   start_instance: true
-  aedt_version: "2024.1"           # must match installed AEDT version
+  aedt_version: "2025.1"           # must match installed AEDT version -- confirmed via
+                                    # ansys.aedt.core.internal.aedt_versions.aedt_versions
+                                    # .list_installed_ansysem == ['ANSYSEM_ROOT251', ...],
+                                    # which PyAEDT maps to version string "2025.1" (the
+                                    # v251 install dir name encodes "2025 R1", NOT "2025.2")
   non_graphical: true              # headless mode (no GUI window)
   port: 50051                      # gRPC port
   desktop_launch_timeout_s: 600    # wait up to 10 min for license checkout

@@ -1,0 +1,52 @@
+# Python bytecache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Simulation outputs — generated artifacts, not source
+outputs/
+crease_fold_study/outputs/
+
+# ANSYS/MAPDL solver scratch and result files
+*.rst
+*.full
+*.emat
+*.esav
+*.db
+*.dbb
+*.mntr
+*.BCS
+*.ce
+*.seld
+*.stat
+*.err
+*.lock
+*.page
+*.log0
+*.s001
+*.s002
+*.s003
+*.s004
+*.s005
+file.BCS
+file.page
+
+# pytest
+.pytest_cache/
+.cache/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log
+batch.log

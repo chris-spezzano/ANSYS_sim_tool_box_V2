@@ -62,11 +62,21 @@ class MAPDLRunner:
         mapdl_cfg = self._cfg.get("mapdl", {})
 
         if kill_zombies and mapdl_cfg.get("start_instance", True):
-            log.info("Clearing ANSYS zombie processes before launch…")
-            killed = kill_ansys_zombies(include_aedt=False, verbose=True)
-            if killed:
-                import time
-                time.sleep(1.5)
+            log.info("Clearing ANSYS zombie processes before launch...")
+            kill_ansys_zombies(include_aedt=False, verbose=True)
+            # Poll until the port is actually free (taskkill is async; the OS
+            # TCP stack can hold the port in TIME_WAIT for several seconds).
+            import time
+            port = int(mapdl_cfg.get("port", 50052))
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                if not check_ports([port]).get(port):
+                    break
+                time.sleep(1.0)
+            else:
+                log.warning(
+                    "Port %d still occupied after 20 s — attempting launch anyway", port
+                )
 
         self._mapdl   = _connect(mapdl_cfg, self._cfg.get("resources", {}))
         self._owns_it = mapdl_cfg.get("start_instance", True)
@@ -145,6 +155,15 @@ def _connect(mapdl_cfg: dict, resources_cfg: dict) -> Any:
         # Headless mode — suppress MAPDL GUI window
         if not mapdl_cfg.get("show_gui", False):
             kwargs["additional_switches"] = "-g"
+
+        # Redirect ANSYS scratch/temp files to the run_location drive to avoid
+        # filling the OS temp drive (C:) with large EMAT/ESAV files.
+        if run_loc:
+            ansys_tmp = Path(run_loc).parent / "ansys_tmp"
+            ansys_tmp.mkdir(parents=True, exist_ok=True)
+            os.environ["TEMP"] = str(ansys_tmp)
+            os.environ["TMP"]  = str(ansys_tmp)
+            log.info("TEMP/TMP redirected to %s", ansys_tmp)
 
         # USERMAT DLL — set ANS_USER_PATH so MAPDL loads it at startup
         usermat_dll = mapdl_cfg.get("usermat_dll")

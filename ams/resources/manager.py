@@ -29,8 +29,8 @@ log = logging.getLogger(__name__)
 
 # ── Process names to target when killing zombies ──────────────────────────────
 # These are the executable names as seen in the OS process table.
-_MAPDL_PROC_NAMES   = {"ansys252", "ansys251", "ansys242", "ansys241", "ansys232",
-                        "ansys231", "ansysedt", "mapdl"}
+_MAPDL_PROC_NAMES   = {"ansys", "ansys252", "ansys251", "ansys242", "ansys241",
+                        "ansys232", "ansys231", "ansysedt", "mapdl"}
 _AEDT_PROC_NAMES    = {"ansysedt", "aedt", "hfss", "q3d", "maxwell", "icepak"}
 _GRPC_SERVER_NAMES  = {"apdl_grpc_server", "grpc_server", "mapdl_server"}
 

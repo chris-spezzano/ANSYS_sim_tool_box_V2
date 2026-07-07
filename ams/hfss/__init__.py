@@ -3,14 +3,15 @@ from .boundary import (
     assign_finite_conductivity,
     assign_pec,
     assign_radiation_boundary,
-    assign_floquet_port,
-    assign_periodic_master_slave,
+    assign_floquet_ports,
+    assign_periodic_lattice_pairs,
 )
 from .postproc import (
     extract_s_parameters,
     save_sparameter_plots,
     write_s_parameters_csv,
-    export_field_hdf5,
+    export_field_file,
+    export_poynting_field,
 )
 
 __all__ = [
@@ -19,10 +20,11 @@ __all__ = [
     "assign_finite_conductivity",
     "assign_pec",
     "assign_radiation_boundary",
-    "assign_floquet_port",
-    "assign_periodic_master_slave",
+    "assign_floquet_ports",
+    "assign_periodic_lattice_pairs",
     "extract_s_parameters",
     "save_sparameter_plots",
     "write_s_parameters_csv",
-    "export_field_hdf5",
+    "export_field_file",
+    "export_poynting_field",
 ]

@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 def extract_s_parameters(
     hfss,
     port_names: list[str] | None = None,
+    mode_index: int = 1,
     freq_points: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Extract S-parameter data from a completed HFSS analysis.
@@ -52,8 +53,17 @@ def extract_s_parameters(
     ----------
     hfss : HFSS object
     port_names : list[str] | None
-        Port names to extract, e.g., ['FloquetPort:1', 'FloquetPort:2'].
-        None = extract all ports.
+        Port names to extract, e.g., ['FloquetPort1', 'FloquetPort2'].
+        None = use ['FloquetPort1', 'FloquetPort2'].
+    mode_index : int
+        Which Floquet mode to report (1 = fundamental TE(0,0); see
+        assign_floquet_ports()'s docstring for the mode-numbering
+        convention). A multi-mode Floquet port REQUIRES this suffix --
+        confirmed this session that available_report_quantities() lists
+        entries as e.g. "S(FloquetPort1:1,FloquetPort1:1)", not the bare
+        "S(FloquetPort1,FloquetPort1)" this function requested before,
+        which made get_solution_data() return False silently ("Solution
+        Data failed to load") instead of raising.
     freq_points : int | None
         Number of frequency points.  None = use all available.
 
@@ -71,29 +81,35 @@ def extract_s_parameters(
     """
     try:
         post = hfss.post
+        p1 = (port_names or ["FloquetPort1", "FloquetPort2"])[0]
+        p2 = (port_names or ["FloquetPort1", "FloquetPort2"])[1]
+        p1, p2 = f"{p1}:{mode_index}", f"{p2}:{mode_index}"
 
-        # Get frequency array
-        freq_data = post.get_report_data(
-            expression="Freq",
-            primary_sweep="Freq",
+        # PostProcessorHFSS.get_report_data() does not exist in PyAEDT 1.1.0
+        # (confirmed this session, AttributeError) -- get_solution_data() is
+        # the real method, returning a SolutionData object whose values come
+        # back through get_expression_data(expr, formula=...), not a
+        # data_magnitude() method (also confirmed absent on SolutionData in
+        # this version).
+        s11_expr = f"S({p1},{p1})"
+        s21_expr = f"S({p2},{p1})"
+        solution = post.get_solution_data(
+            expressions=[s11_expr, s21_expr],
+            primary_sweep_variable="Freq",
         )
-        freq_Hz = np.array([float(f) for f in freq_data.primary_sweep_values])
-        freq_GHz = freq_Hz / 1e9
+        # primary_sweep_values comes back already in the sweep's native unit
+        # (GHz, since create_linear_count_sweep() in this project is always
+        # called with unit="GHz") -- NOT Hz. Confirmed this session: dividing
+        # by 1e9 here on top of that silently produced "0.000 GHz" labels
+        # (e.g. 1.0 GHz became 1e-9) without raising, since this function
+        # only ever had a single sweep point to mis-scale.
+        freq_GHz = np.array([float(f) for f in solution.primary_sweep_values])
 
-        # S11 magnitude
-        s11_data = post.get_report_data(
-            expression="dB(S(FloquetPort1,FloquetPort1))",
-            primary_sweep="Freq",
-        )
-        s11_dB = np.array([float(v) for v in s11_data.data_magnitude()])
+        _, s11_dB = solution.get_expression_data(s11_expr, formula="db20")
+        _, s21_dB = solution.get_expression_data(s21_expr, formula="db20")
+        s11_dB = np.asarray(s11_dB, dtype=float)
+        s21_dB = np.asarray(s21_dB, dtype=float)
         s11_mag = 10 ** (s11_dB / 20)
-
-        # S21 magnitude
-        s21_data = post.get_report_data(
-            expression="dB(S(FloquetPort2,FloquetPort1))",
-            primary_sweep="Freq",
-        )
-        s21_dB = np.array([float(v) for v in s21_data.data_magnitude()])
         s21_mag = 10 ** (s21_dB / 20)
 
         # Energy partition
@@ -127,50 +143,109 @@ def extract_s_parameters(
         raise
 
 
-def export_field_hdf5(
+def export_field_file(
     hfss,
-    output_dir: str | Path,
-    field_type: str = "E",
-    component:  str = "Mag_E",
-    freq_GHz:   float | None = None,
-    filename:   str = "field_data.h5",
+    quantity: str,
+    setup_name: str,
+    freq_GHz: float,
+    output_path: str | Path,
+    assignment: str = "AllObjects",
+    objects_type: str = "Vol",
+    extra_solutions: list[str] | None = None,
 ) -> Path | None:
-    """Export electric or magnetic field distribution to HDF5.
+    """Export a scalar/vector field quantity (e.g. 'Mag_E', 'Mag_H') to a
+    native HFSS .fld file via Hfss.post.export_field_file() -- NOT HDF5 (an
+    earlier version of this function, export_field_hdf5(), was named for a
+    format it never actually produced, and called export_field_file() with
+    kwarg names -- quantity/variation/filename/gridtype -- that don't match
+    this PyAEDT version's real signature: quantity/solution/variations/
+    output_file/assignment/objects_type/intrinsics. That mismatch meant the
+    function had never actually worked).
 
-    Parameters
-    ----------
-    field_type : str
-        'E' for electric field, 'H' for magnetic field.
-    component : str
-        Field component: 'Mag_E', 'ComplexMag_E', 'E_x', 'E_y', 'E_z', etc.
-    freq_GHz : float | None
-        Frequency to export.  None = last solved frequency.
-    filename : str
-        Output HDF5 filename.
+    Modeled directly on a proven, previously-run implementation
+    (D:/Projects/origami_emi_workflow/main/stages/stage3_hfss.py,
+    _try_export_field_file()): tries "<setup> : LastAdaptive" first, then
+    falls through extra_solutions (e.g. a named sweep), since which solution
+    string is valid depends on whether freq_GHz matches the adaptive-pass
+    frequency or a separate sweep point.
 
-    Returns
-    -------
-    Path to the HDF5 file, or None if export failed.
+    Returns the output Path on success, None if every solution string failed
+    (logged, not raised -- field export is a nice-to-have postprocessing
+    step, not something that should fail the whole run).
     """
-    out_dir  = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    h5_path  = out_dir / filename
+    output_path = Path(output_path)
+    solutions_to_try = [f"{setup_name} : LastAdaptive"] + (extra_solutions or [])
+    intrinsics = {"Freq": f"{freq_GHz}GHz", "Phase": "0deg"}
 
+    for solution in solutions_to_try:
+        try:
+            ok = hfss.post.export_field_file(
+                quantity=quantity,
+                solution=solution,
+                output_file=str(output_path),
+                assignment=assignment,
+                objects_type=objects_type,
+                intrinsics=intrinsics,
+            )
+            if ok:
+                log.info("%s exported -> %s (solution=%s)", quantity, output_path, solution)
+                return output_path
+        except Exception as exc:
+            log.debug("%s export failed at %.3f GHz (solution=%s): %s", quantity, freq_GHz, solution, exc)
+    log.warning("%s export failed at %.3f GHz (tried: %s)", quantity, freq_GHz, solutions_to_try)
+    return None
+
+
+def export_poynting_field(
+    hfss,
+    setup_name: str,
+    freq_GHz: float,
+    output_path: str | Path,
+    assignment: str = "AllObjects",
+    extra_solutions: list[str] | None = None,
+) -> Path | None:
+    """Export the Poynting-vector-magnitude field (power flow/deposition
+    density) to a native .fld file.
+
+    export_field_file()'s `quantity` argument only accepts AEDT's built-in
+    named field quantities (Mag_E, Mag_H, etc.) -- Poynting isn't one of
+    them, so it has to go through the raw Fields Calculator stack instead
+    (hfss.post.ofieldsreporter, a dynamic gRPC object -- EnterQty/CalcOp/
+    EnterVol/CalculatorWrite aren't discoverable via dir()/inspect, but are
+    real, callable AEDT scripting methods). Same proven pattern as
+    export_field_file() above, from the same reference implementation.
+    """
+    output_path = Path(output_path)
+    solutions_to_try = [f"{setup_name} : LastAdaptive"] + (extra_solutions or [])
+    intrinsics = {"Freq": f"{freq_GHz}GHz", "Phase": "0deg"}
+
+    variation: list[str] = []
     try:
-        setup_name = hfss.setups[0]   # use first setup
-        freq_str   = f"{freq_GHz}GHz" if freq_GHz else ""
+        nominal = hfss.available_variations.nominal_variation(dependent_params=False)
+        for name, val in nominal.items():
+            if hfss.variable_manager.variables[name].sweep:
+                variation.extend([f"{name}:=", val])
+    except Exception:
+        pass
+    for k, v in intrinsics.items():
+        variation.extend([f"{k}:=", v])
 
-        hfss.post.export_field_file(
-            quantity   = component,
-            variation  = {"Freq": freq_str} if freq_str else {},
-            filename   = str(h5_path),
-            gridtype   = "Cartesian",
-        )
-        log.info("Field data exported → %s", h5_path)
-        return h5_path
-    except Exception as exc:
-        log.warning("Field export failed: %s", exc)
-        return None
+    ofr = hfss.post.ofieldsreporter
+    for solution in solutions_to_try:
+        try:
+            ofr.CalcStack("clear")
+            ofr.EnterQty("Poynting")
+            ofr.CalcOp("Mag")
+            ofr.EnterVol(assignment)
+            ofr.CalcOp("Value")
+            ofr.CalculatorWrite(str(output_path), ["Solution:=", solution], variation)
+            if output_path.exists():
+                log.info("Poynting magnitude exported -> %s (solution=%s)", output_path, solution)
+                return output_path
+        except Exception as exc:
+            log.debug("Poynting export failed at %.3f GHz (solution=%s): %s", freq_GHz, solution, exc)
+    log.warning("Poynting export failed at %.3f GHz (tried: %s)", freq_GHz, solutions_to_try)
+    return None
 
 
 def save_sparameter_plots(

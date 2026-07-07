@@ -6,6 +6,7 @@ from .standard import (
     assign_neohookean,
     apply_materials,
 )
+from .library import load_materials_yaml, resolve_material_config
 
 __all__ = [
     "assign_elastic",
@@ -14,4 +15,6 @@ __all__ = [
     "assign_chaboche",
     "assign_neohookean",
     "apply_materials",
+    "load_materials_yaml",
+    "resolve_material_config",
 ]

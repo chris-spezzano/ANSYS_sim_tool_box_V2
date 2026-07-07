@@ -259,11 +259,21 @@ class SimulationPipeline:
         """Resolve inputs and call stage.run_fn."""
         merged_cfg = _deep_merge(self._global_cfg, stage.config)
 
-        # Build kwargs from input_map
+        # Build kwargs from input_map.
+        # Keys prefixed with '?' are optional — missing context entries are
+        # silently skipped rather than raising KeyError.  This lets one stage
+        # declare mappings for both 'inp_path' and 'cdb_path' without knowing
+        # which the upstream geometry stage actually produced.
         kwargs: dict[str, Any] = {}
         for context_key, kwarg_name in stage.input_map.items():
-            value = self._resolve_context_key(context_key)
-            kwargs[kwarg_name] = value
+            optional = context_key.startswith("?")
+            bare_key = context_key.lstrip("?")
+            try:
+                value = self._resolve_context_key(bare_key)
+                kwargs[kwarg_name] = value
+            except KeyError:
+                if not optional:
+                    raise
 
         return stage.run_fn(merged_cfg, **kwargs)
 
@@ -358,7 +368,7 @@ def make_mapdl_structural_stage(
     """Factory: MAPDL large-deformation structural stage."""
     from ..mapdl.runner import MAPDLRunner
     from ..mapdl.solver import run_solution, SolverStrategy
-    from ..mapdl.postproc import extract_results, write_csv, save_animation
+    from ..mapdl.postproc import extract_results, write_csv
     from ..geometry.importer import GeometryImporter
     from ..geometry.mesh_quality import MeshQualityChecker
     from ..mapdl.boundary import apply_boundary_conditions
@@ -406,12 +416,37 @@ def make_mapdl_structural_stage(
     )
 
 
+def make_ntop_geometry_stage(
+    config_override: dict | None = None,
+) -> PipelineStage:
+    """Factory: nTopology headless geometry generation stage.
+
+    Calls ntopology.exe with the parameter overrides defined in ``cfg["ntop"]``,
+    waits for the CDB export, and returns ``{"cdb_path": "...", ...}`` so the
+    downstream structural stage can pick up the file via input_map.
+
+    Requires the ``ntop`` section in the config (see ntop_driver.py docstring).
+
+    Example input_map for the downstream structural stage::
+
+        input_map={"geometry.cdb_path": "cdb_path"}
+    """
+    from ..geometry.ntop_driver import run_ntop_from_config
+
+    return PipelineStage(
+        name           = "geometry",
+        run_fn         = run_ntop_from_config,
+        config         = config_override or {},
+        checkpoint_key = "geometry",
+    )
+
+
 def make_hfss_em_stage(
     config_override: dict | None = None,
 ) -> PipelineStage:
     """Factory: HFSS electromagnetic analysis stage."""
     from ..hfss.runner   import HFSSRunner
-    from ..hfss.boundary import assign_finite_conductivity, assign_floquet_port
+    from ..hfss.boundary import assign_finite_conductivity
     from ..hfss.postproc import extract_s_parameters, write_s_parameters_csv, save_sparameter_plots
 
     def run_em(cfg: dict, stl_path: str | None = None) -> dict:
@@ -472,4 +507,151 @@ def make_hfss_em_stage(
         config    = config_override or {},
         input_map = {"structural.stl_path": "stl_path"},
         checkpoint_key = "em_shielding",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High-level builder: full waterbomb pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_waterbomb_pipeline(cfg: dict) -> "SimulationPipeline":
+    """Build the complete nTopology → MAPDL → HFSS waterbomb pipeline.
+
+    Stages
+    ------
+    1. geometry    : nTopology CLI → exports CDB to ntop.export_dir
+    2. structural  : MAPDL import CDB → SHELL181 reassign → waterbomb fold BCs
+                     → large-deformation static solve → deformed STL export
+    3. em_shielding: (optional) HFSS → import deformed STL → Floquet BCs
+                     → frequency sweep → S-parameters CSV
+
+    The EM stage is skipped if ``cfg["hfss"]["geometry"]["stl_path"]`` is null
+    AND the structural stage has not produced an STL.
+
+    Parameters
+    ----------
+    cfg : dict
+        Full pipeline config — typically loaded from origami_folding.yaml or
+        a sweep YAML.  Must contain at minimum: ntop, mapdl, geometry,
+        elements, materials, bcs.origami_fold, solver, output.
+
+    Returns
+    -------
+    SimulationPipeline ready to call .run() or .sweep() on.
+
+    Example
+    -------
+    >>> import yaml
+    >>> from ams.multiphysics.pipeline import build_waterbomb_pipeline
+    >>> with open("examples/origami_folding/origami_folding.yaml") as f:
+    ...     cfg = yaml.safe_load(f)
+    >>> pipeline = build_waterbomb_pipeline(cfg)
+    >>> pipeline.print_plan()
+    >>> results = pipeline.run()
+    """
+    from ..geometry.importer import GeometryImporter
+    from ..geometry.mesh_quality import MeshQualityChecker
+    from ..mapdl.runner import MAPDLRunner
+    from ..mapdl.solver import run_solution, SolverStrategy
+    from ..mapdl.postproc import extract_results, write_csv
+    from ..mapdl.origami_bcs import apply_waterbomb_fold_bcs
+    from ..materials.standard import apply_materials
+
+    # ── Stage 1: nTopology geometry ──────────────────────────────────────────
+    geometry_stage = make_ntop_geometry_stage()
+
+    # ── Stage 2: MAPDL structural ────────────────────────────────────────────
+    def run_structural(
+        cfg: dict,
+        cdb_path: str | None = None,
+        inp_path: str | None = None,
+    ) -> dict:
+        # Accept either a CDB (legacy/direct) or Abaqus .inp (nTop 5.x output).
+        # inp_path is injected from the geometry stage via input_map when nTop
+        # writes .inp; cdb_path is used when a pre-existing CDB is supplied.
+        # Priority: kwarg from upstream stage > geometry block in config
+        actual_inp = inp_path or cfg.get("geometry", {}).get("inp_path")
+        actual_cdb = cdb_path or cfg.get("geometry", {}).get("cdb_path")
+
+        if not actual_inp and not actual_cdb:
+            raise ValueError(
+                "No geometry file found.  Do one of:\n"
+                "  A) Export from nTopology GUI and set geometry.inp_path in YAML\n"
+                "  B) Run the full pipeline (ntop stage sets this automatically)\n"
+                "  C) Set geometry.cdb_path to a pre-existing .cdb file"
+            )
+
+        runner = MAPDLRunner(cfg)
+        mapdl  = runner.connect()
+        try:
+            mapdl.clear()
+            mapdl.prep7()
+
+            gi = GeometryImporter(mapdl)
+            el_cfg = cfg.get("elements", {})
+            et     = el_cfg.get("type", "SHELL181")
+
+            if actual_inp:
+                # nTopology 5.x path: .inp → meshio converts to CDB internally
+                gi.from_inp(actual_inp, reassign_et=et)
+            else:
+                gi.from_cdb(actual_cdb)
+
+            # Reassign from SOLID185 (nTop default) to SHELL181
+            el_cfg = cfg.get("elements", {})
+            gi.reassign_element_type(
+                el_cfg.get("type", "SHELL181"),
+                section_thickness_m=el_cfg.get("section_thickness_m", 0.003),
+                keyopt_overrides=el_cfg.get("keyopt"),
+            )
+
+            apply_materials(mapdl, cfg)
+
+            # Waterbomb-specific BCs (origami crease + centre pin + corner fold)
+            apply_waterbomb_fold_bcs(mapdl, cfg)
+
+            # Mesh quality gate (fails early if mesh is degenerate)
+            checker = MeshQualityChecker(mapdl)
+            report  = checker.check(raise_on_fail=True)
+
+            # Large-deformation static solve
+            strategy = SolverStrategy.from_config(cfg)
+            run_solution(mapdl, strategy)
+
+            # Results
+            out_dir = cfg.get("output", {}).get("dir", "outputs")
+            results = extract_results(mapdl, ["displacement_norm", "von_mises"])
+            write_csv(results, out_dir)
+
+            # Deformed STL for HFSS
+            from pathlib import Path
+            stl_path = str(Path(out_dir) / "deformed_geometry.stl")
+            gi.export_stl(stl_path, deform_scale=cfg.get("output", {}).get("deform_scale", 1.0))
+
+            return {"stl_path": stl_path, "results": results, "mesh_report": report}
+        finally:
+            runner.disconnect()
+
+    structural_stage = PipelineStage(
+        name      = "structural",
+        run_fn    = run_structural,
+        config    = {},
+        # Accept whichever key the geometry stage produced:
+        #   inp_path — nTopology 5.x Export FE Mesh (.inp, converted via meshio)
+        #   cdb_path — direct CDB from older nTop or pre-existing file
+        input_map = {
+            "?geometry.inp_path": "inp_path",   # nTop 5.x (.inp via meshio)
+            "?geometry.cdb_path": "cdb_path",   # legacy / direct CDB
+        },
+        checkpoint_key = "structural",
+    )
+
+    # ── Stage 3: HFSS EM (optional) ──────────────────────────────────────────
+    hfss_stage = make_hfss_em_stage()
+
+    out_dir = cfg.get("output", {}).get("dir", "outputs")
+    return SimulationPipeline(
+        stages     = [geometry_stage, structural_stage, hfss_stage],
+        global_cfg = cfg,
+        output_dir = out_dir,
     )

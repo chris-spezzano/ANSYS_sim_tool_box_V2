@@ -19,7 +19,11 @@ from .mapdl.solver       import run_solution, SolverStrategy
 from .mapdl.postproc     import extract_results, save_plots, save_animation
 from .hfss.runner        import HFSSRunner
 from .diagnostics.dashboard import LiveDashboard
-from .multiphysics.pipeline import SimulationPipeline
+from .multiphysics.pipeline import (
+    SimulationPipeline,
+    build_waterbomb_pipeline,
+    make_ntop_geometry_stage,
+)
 
 __all__ = [
     "ResourceManager",
@@ -36,4 +40,6 @@ __all__ = [
     "HFSSRunner",
     "LiveDashboard",
     "SimulationPipeline",
+    "build_waterbomb_pipeline",
+    "make_ntop_geometry_stage",
 ]

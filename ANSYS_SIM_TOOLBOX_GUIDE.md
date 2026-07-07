@@ -13,18 +13,20 @@
 2. [Configuration System](#2-configuration-system)
 3. [Resource Management & Zombie Cleanup](#3-resource-management--zombie-cleanup)
 4. [Geometry Import](#4-geometry-import)
-5. [Mesh Quality](#5-mesh-quality)
-6. [Element Types](#6-element-types)
-7. [Boundary Conditions — Mathematics](#7-boundary-conditions--mathematics)
-8. [Solver Strategy](#8-solver-strategy)
-9. [Live Diagnostics](#9-live-diagnostics)
-10. [Results Post-Processing](#10-results-post-processing)
-11. [HFSS / AEDT Workflow](#11-hfss--aedt-workflow)
-12. [Multi-Physics Pipeline](#12-multi-physics-pipeline)
-13. [Material Models](#13-material-models)
-14. [Bug Catalogue](#14-bug-catalogue)
-15. [Design Decisions](#15-design-decisions)
-16. [Glossary](#16-glossary)
+5. [nTopology Automation & Parameter Injection](#5-ntopology-automation--parameter-injection)
+6. [Mesh Quality](#6-mesh-quality)
+7. [Element Types](#7-element-types)
+8. [Boundary Conditions — Mathematics](#8-boundary-conditions--mathematics)
+9. [Origami Fold Boundary Conditions](#9-origami-fold-boundary-conditions)
+10. [Solver Strategy](#10-solver-strategy)
+11. [Live Diagnostics](#11-live-diagnostics)
+12. [Results Post-Processing](#12-results-post-processing)
+13. [HFSS / AEDT Workflow](#13-hfss--aedt-workflow)
+14. [Multi-Physics Pipeline](#14-multi-physics-pipeline)
+15. [Material Models](#15-material-models)
+16. [Bug Catalogue](#16-bug-catalogue)
+17. [Design Decisions](#17-design-decisions)
+18. [Glossary](#18-glossary)
 
 ---
 
@@ -76,13 +78,15 @@ ansys_sim_toolbox/
 │   │   └── manager.py          # kill_ansys_zombies(), ResourceManager, check_ports()
 │   │
 │   ├── geometry/
-│   │   ├── importer.py         # GeometryImporter: CDB/STL/STEP/parametric
+│   │   ├── importer.py         # GeometryImporter: CDB/INP/STL/STEP/parametric
+│   │   ├── ntop_driver.py      # NTopDriver: headless CLI + JSON parameter injection
 │   │   ├── mesh_quality.py     # MeshQualityChecker: Jacobian, AR, manifold, watertight
 │   │   └── element_selector.py # choose_element(), ELEMENT_LIBRARY reference
 │   │
 │   ├── mapdl/
 │   │   ├── runner.py           # MAPDLRunner: connect/disconnect with zombie cleanup
 │   │   ├── boundary.py         # apply_*: Dirichlet, Neumann, Robin, periodic, symmetry
+│   │   ├── origami_bcs.py      # apply_waterbomb_fold_bcs: crease-line BC assignment
 │   │   ├── solver.py           # SolverStrategy, run_solution: NR/modal/harmonic/transient
 │   │   ├── postproc.py         # extract_results, probe_point, save_plots, export_vtk
 │   │   └── __init__.py
@@ -102,7 +106,7 @@ ansys_sim_toolbox/
 │   │   └── __init__.py
 │   │
 │   └── multiphysics/
-│       ├── pipeline.py         # SimulationPipeline, PipelineStage, sweep
+│       ├── pipeline.py         # SimulationPipeline, PipelineStage, build_waterbomb_pipeline
 │       └── __init__.py
 │
 ├── pages/                      # Streamlit multi-page app
@@ -138,11 +142,19 @@ ansys_sim_toolbox/
 │   ├── test_mesh_quality.py
 │   └── test_pipeline.py
 │
+├── simulation_meshes/          # Manually exported meshes (committed for quick testing)
+│   └── waterbomb_mesh.inp      # Abaqus .inp from nTopology Export FE Mesh block
+│
 └── examples/
-    ├── tensile_bar/
-    ├── cyclic_fatigue/
-    ├── origami_folding/
-    └── em_shielding/
+    ├── tensile_bar/            # Kirsch benchmark — Kt=3 stress concentration
+    ├── cyclic_fatigue/         # Fatigue life estimation
+    ├── origami_folding/        # Waterbomb fold — nTop→MAPDL→HFSS full pipeline
+    │   ├── origami_folding.yaml
+    │   └── (generated outputs in outputs/origami_folding/)
+    ├── waterbomb_sweep/        # Parametric sweep over trough depth × fold angle
+    │   ├── waterbomb_sweep.yaml
+    │   └── run_sweep.py
+    └── em_shielding/           # HFSS EM shielding standalone example
 ```
 
 ---
@@ -256,28 +268,88 @@ Rule of thumb: `ram_mb ≈ 25 × (n_elements / 1000)` MB.
 
 ## 4  Geometry Import
 
-### CDB from nTopology
+### nTopology 5.x — Abaqus .inp export (current workflow)
+
+nTopology 5.x does **not** support `.cdb` export from the Export FE Mesh block.
+The supported format for FEA is **Abaqus `.inp`**.  The toolbox converts it
+transparently using `meshio` before MAPDL ever sees it.
+
+**Step 1 — In nTopology:**
+- Add an FE Shell Mesh block, connect it to your final body
+- In the Export FE Mesh block, set Path to a full absolute path ending in `.inp`:
+  ```
+  E:\Projects\ansys_sim_toolbox\simulation_meshes\waterbomb_mesh.inp
+  ```
+- Compute the Export FE Mesh block — the file is written immediately.
+
+**Step 2 — In Python:**
 
 ```python
 from ams.geometry.importer import GeometryImporter
-gi = GeometryImporter(mapdl)
-gi.from_cdb("results/geometry/origami_mesh.cdb")
 
-# CRITICAL: reassign element type if nTop exported SOLID185 for a shell model
+gi = GeometryImporter(mapdl)
+
+# Converts .inp → .cdb via meshio, then imports with CDREAD
+gi.from_inp(
+    "E:/Projects/ansys_sim_toolbox/simulation_meshes/waterbomb_mesh.inp",
+    reassign_et="SHELL181",      # nTop shell mesh → SHELL181 for large deformation
+)
+```
+
+**Step 3 — In YAML (for pipeline use):**
+
+```yaml
+geometry:
+  source: "inp"
+  inp_path: "E:/Projects/ansys_sim_toolbox/simulation_meshes/waterbomb_mesh.inp"
+  cdb_path: null
+```
+
+The `build_waterbomb_pipeline()` factory reads `geometry.inp_path` automatically.
+
+### How the .inp → .cdb conversion works
+
+```
+nTopology Export FE Mesh
+  └─ writes waterbomb_mesh.inp  (Abaqus format: *NODE, *ELEMENT, *SURFACE sections)
+         │
+         ▼  meshio.read()
+  meshio internal representation
+  (points array, cells list, tags dict)
+         │
+         ▼  meshio.write(format="ansys")
+  waterbomb_mesh.cdb  (ANSYS CDB: NBLOCK, EBLOCK, CMBLOCK sections)
+         │
+         ▼  mapdl.cdread("DB", ...)
+  MAPDL mesh database
+         │
+         ▼  reassign_element_type("SHELL181")
+  SHELL181 elements ready for large-deformation solve
+```
+
+The `.cdb` is written alongside the `.inp` (same directory) and reused on
+subsequent runs.  Delete it to force re-conversion.
+
+### Legacy: CDB from older nTopology versions
+
+If you have nTopology < 5.0 or a pre-existing `.cdb`:
+
+```python
+gi.from_cdb("path/to/mesh.cdb")
 gi.reassign_element_type("SHELL181", section_thickness_m=0.001)
 ```
 
 **Why `reassign_element_type` is needed:** nTopology exports SOLID185 (3D
 solid) by default.  For thin-shell structures (origami, sheet metal), this
 causes severe **shear locking** — the element is too stiff in bending.
-SHELL181 uses a proper Mindlin-Reissner shell formulation.
+SHELL181 uses a Mindlin-Reissner shell formulation with large-rotation capability.
 
 **Why `nrotat_all=True` (default):** nTopology may include coordinate system
 rotations for nodes.  `NROTAT,ALL` resets all nodal coordinate systems to
 align with the global Cartesian frame.  Without this, `D,ALL,UX,0` may
 constrain the wrong direction on rotated nodes.
 
-### Parametric geometry
+### Parametric geometry (no nTopology required)
 
 ```python
 gi.build_plate_with_hole(
@@ -288,7 +360,132 @@ gi.build_plate_with_hole(
 
 ---
 
-## 5  Mesh Quality
+## 5  nTopology Automation & Parameter Injection
+
+### Overview
+
+`ams/geometry/ntop_driver.py` drives nTopology headlessly from Python.
+Any **Input Block** visible in the nTopology workflow tree can be overridden
+at run time by passing a JSON file to the CLI:
+
+```
+ntopology.exe --headless --run Waterbomb.ntop
+              --json-input _ntop_params.json
+              --output outputs/geometry/
+```
+
+### JSON parameter file format
+
+The JSON file maps Input Block names (exactly as shown in the tree) to new values:
+
+```json
+{
+  "inputs": {
+    "Plate Size X":    70.0,
+    "Plate Size Y":    70.0,
+    "Plate Thickness":  3.0,
+    "Trough Depth":     1.6,
+    "Trough Width":     2.0,
+    "Mesh Tolerance":   1.0
+  }
+}
+```
+
+Units are whatever the Input Block is defined in nTopology (the nTop workflow
+defines the unit; the JSON value is a bare number).  For the Waterbomb workflow
+all blocks are defined in **mm**.
+
+### Python API
+
+```python
+from ams.geometry.ntop_driver import NTopDriver
+
+driver = NTopDriver()   # auto-detects ntopology.exe
+outputs = driver.run(
+    project    = "Waterbomb.ntop",
+    parameters = {
+        "Plate Size X":  70.0,
+        "Trough Depth":   2.4,   # deeper crease → lower fold force
+        "Mesh Tolerance": 0.5,   # finer mesh → longer nTop run
+    },
+    export_dir       = "outputs/geometry/iter_001",
+    expected_outputs = ["*.inp"],
+)
+cdb_path = outputs["*.inp"]
+```
+
+### YAML-driven (pipeline use)
+
+```yaml
+ntop:
+  executable: null           # null = auto-detect ntopology.exe
+  project: "Waterbomb.ntop"
+  timeout_s: 300
+
+  parameters:                # ← these become the JSON "inputs" dict
+    Plate Size X:   70.0
+    Plate Size Y:   70.0
+    Plate Thickness: 3.0
+    Trough Depth:    1.6
+    Trough Width:    2.0
+    Mesh Tolerance:  1.0
+
+  export_dir: "outputs/origami_folding/geometry"
+  expected_outputs: ["*.inp"]
+```
+
+### How YAML parameters connect to boundary conditions
+
+The same parameter values that control nTop geometry must match the BC geometry
+parameters.  The link is explicit:
+
+| nTop Input Block | nTop effect | YAML BC parameter that must match |
+|---|---|---|
+| `Plate Size X` | overall plate width | `bcs.origami_fold.plate_length_mm` |
+| `Plate Size X / 2` | crease x-centre | `bcs.origami_fold.plate_center_x_mm` |
+| `Plate Size Y / 2` | crease y-centre | `bcs.origami_fold.plate_center_y_mm` |
+| `Mesh Tolerance` | mesh edge length | `bcs.origami_fold.crease_tol_mm` (≥ Mesh Tolerance / 2) |
+| `Trough Depth` | crease geometry | no direct BC link — affects stiffness only |
+
+In a parametric sweep, when `Plate Size X` changes, update `plate_length_mm`
+and `plate_center_x_mm` in the same sweep point dict.  `crease_tol_mm` should
+also scale: use `Mesh Tolerance / 2` as the minimum value.
+
+### Parametric sweep
+
+```python
+from ams.geometry.ntop_driver import NTopDriver
+
+driver = NTopDriver()
+results = driver.run_sweep(
+    project          = "Waterbomb.ntop",
+    param_sets       = [
+        {"Trough Depth": 1.0, "Mesh Tolerance": 1.0},
+        {"Trough Depth": 1.6, "Mesh Tolerance": 1.0},
+        {"Trough Depth": 2.4, "Mesh Tolerance": 0.5},
+    ],
+    base_export_dir  = "outputs/trough_sweep",
+    expected_outputs = ["*.inp"],
+)
+# results[0]["*.inp"] → Path to first iteration's .inp file
+```
+
+### Generalizing to other geometries
+
+The `NTopDriver` is geometry-agnostic.  Any `.ntop` file that has:
+1. **Input Blocks** for the parameters you want to vary
+2. An **Export FE Mesh** block pointing to a relative `.inp` path
+
+...can be driven by exactly the same Python API.  The only things that change:
+- The `parameters` dict keys (must match your Input Block names)
+- The `bcs.*` section (depends on your geometry's BC locations)
+
+For non-origami geometries, use the standard `bcs.constraints` / `bcs.loads`
+blocks (see §8) driven by face coordinates, instead of `bcs.origami_fold`.
+
+---
+
+## 6  Mesh Quality
 
 Always run before solving:
 
@@ -318,7 +515,7 @@ sharp features.
 
 ---
 
-## 6  Element Types
+## 7  Element Types
 
 Quick reference:
 
@@ -343,7 +540,7 @@ print(elem.name)  # → SHELL181
 
 ---
 
-## 7  Boundary Conditions — Mathematics
+## 8  Boundary Conditions — Mathematics
 
 ### Strong form
 
@@ -381,7 +578,110 @@ apply_periodic(mapdl, axis="X", lo_coord=0.0, hi_coord=0.02, dofs=["UX","UY","UZ
 
 ---
 
-## 8  Solver Strategy
+## 9  Origami Fold Boundary Conditions
+
+Origami simulations require BCs that target **crease lines**, not faces.
+`ams/mapdl/origami_bcs.py` implements two strategies for the waterbomb pattern,
+generalizable to any origami tessellation.
+
+### Crease-line geometry for the waterbomb
+
+For a square plate of side $L$ centred at $(c_x, c_y)$:
+
+| Crease | Equation | MAPDL selection |
+|--------|----------|-----------------|
+| Vertical | $x = c_x$ | `np.abs(x - cx) < tol` |
+| Horizontal | $y = c_y$ | `np.abs(y - cy) < tol` |
+| +45° diagonal | $y - c_y = x - c_x$ | `np.abs((y-cy) - (x-cx)) < tol` |
+| −45° diagonal | $y - c_y = -(x - c_x)$ | `np.abs((y-cy) + (x-cx)) < tol` |
+
+The diagonal equations cannot be expressed with MAPDL's `NSEL,S,LOC` (which
+only selects coordinate slabs).  The selection is computed in NumPy over all
+node coordinates and the matching nodes are added one by one with `NSEL,A,NODE`.
+
+### Strategy A — Displacement-driven (recommended)
+
+1. Pin centre patch: `D,ALL,UX,0` + `D,ALL,UY,0` + `D,ALL,UZ,0`  
+   (rotational DOFs left free — the dome hub must rotate)
+2. Apply `D,ALL,UZ,δ` on the 4 outer corner nodes
+
+Fold half-angle from corner displacement:
+$$\theta = \arcsin\!\left(\frac{\delta}{L/2}\right)$$
+
+For the 70 mm plate with `fold_uz_mm: 15`: $\theta \approx 25°$.
+
+### Strategy B — Rotation-driven (SHELL181 only)
+
+Prescribe rotational DOFs directly at each crease.
+Mountain/valley folds are distinguished by sign:
+
+| Crease | DOF | Sign | Fold type |
+|--------|-----|------|-----------|
+| Vertical | ROTY | + | valley |
+| Horizontal | ROTX | + | valley |
+| +45° diagonal | ROTZ | − | mountain |
+| −45° diagonal | ROTZ | − | mountain |
+
+### Named components vs coordinate selection
+
+nTopology can export **Named Selections** (CMBLOCK records in the CDB) that
+tag node groups by name.  When present, they are used directly:
+
+```python
+mapdl.cmsel("S", "CREASE_VERT")   # instant, exact
+```
+
+When absent (current default), the coordinate math above runs instead.  To
+enable named components, add Named Selection export blocks in nTop for each
+crease tag (`CREASE_VERT`, `CREASE_HORIZ`, `CREASE_DIAG_P`, `CREASE_DIAG_N`,
+`CENTER_PATCH`, `OUTER_CORNERS`) and wire them to the Export FE Mesh `Sets`
+field.  Then set the component names in the YAML:
+
+```yaml
+bcs:
+  origami_fold:
+    component_names:
+      crease_vert:   "CREASE_VERT"
+      crease_horiz:  "CREASE_HORIZ"
+      crease_diag_p: "CREASE_DIAG_P"
+      crease_diag_n: "CREASE_DIAG_N"
+      center_patch:  "CENTER_PATCH"
+      outer_corners: "OUTER_CORNERS"
+```
+
+### Python API
+
+```python
+from ams.mapdl.origami_bcs import apply_waterbomb_fold_bcs, get_crease_node_sets
+
+# Apply all BCs from config
+apply_waterbomb_fold_bcs(mapdl, cfg)
+
+# Get crease node sets for post-processing
+sets = get_crease_node_sets(mapdl, cx=0.035, cy=0.035, crease_tol_m=0.0006)
+print(sets.keys())  # vertical, horizontal, diag_p, diag_n, all_creases
+```
+
+### Generalizing to other origami patterns
+
+The approach extends to any pattern where crease lines have an analytic
+description:
+
+| Pattern | Crease description | NumPy condition |
+|---|---|---|
+| Miura-ori | Parallel diagonal lines | `np.abs((y - ky*x) - offset) < tol` |
+| Yoshimura | Zigzag lines | `np.abs(y - f(x)) < tol` (piecewise) |
+| Kresling | Helical lines | Distance from parametric helix < tol |
+| Arbitrary | Named components from nTop | `mapdl.cmsel("S", name)` |
+
+For any pattern: define the crease equation, compute the boolean mask in NumPy,
+select nodes with `NSEL,A,NODE`, apply DOFs.  The `crease_tol_mm` parameter is
+the only geometry-specific tuning value — set it to at least half the mesh
+edge length.
+
+---
+
+## 10  Solver Strategy
 
 ### Newton-Raphson algorithm
 
@@ -429,7 +729,7 @@ When NR fails to converge:
 
 ---
 
-## 9  Live Diagnostics
+## 11  Live Diagnostics
 
 ```python
 from ams.diagnostics.dashboard import LiveDashboard, live_solve_with_dashboard
@@ -457,7 +757,7 @@ What it monitors:
 
 ---
 
-## 10  Results Post-Processing
+## 12  Results Post-Processing
 
 ```python
 from ams.mapdl.postproc import extract_results, write_csv, save_plots, probe_point, export_vtk
@@ -495,7 +795,7 @@ print(f"von Mises at probe: {vals['von_mises']/1e6:.1f} MPa")
 
 ---
 
-## 11  HFSS / AEDT Workflow
+## 13  HFSS / AEDT Workflow
 
 ### Critical rules (from origami debug log)
 
@@ -534,7 +834,7 @@ runner.disconnect()
 
 ---
 
-## 12  Multi-Physics Pipeline
+## 14  Multi-Physics Pipeline
 
 ```python
 from ams.multiphysics.pipeline import (
@@ -563,7 +863,7 @@ Stage outputs are accessible as `results["stage_name"]["output_key"]`.
 
 ---
 
-## 13  Material Models
+## 15  Material Models
 
 | Model | Function | Required parameters |
 |-------|----------|---------------------|
@@ -590,7 +890,7 @@ materials:
 
 ---
 
-## 14  Bug Catalogue
+## 16  Bug Catalogue
 
 Documented bugs from the origami EMI workflow and MAPDL projects:
 
@@ -644,9 +944,34 @@ Documented bugs from the origami EMI workflow and MAPDL projects:
 **Root cause:** matplotlib 3.8 removed `tostring_rgb()`.  
 **Fix:** Use `fig.canvas.buffer_rgba()` then slice `[:,:,:3]` (implemented in `postproc.py`).
 
+### BUG-11: nTopology 5.x Export FE Mesh does not support `.cdb`
+**Symptom:** Export FE Mesh block shows error: *"Provided file extension (.cdb) isn't supported."*  
+**Root cause:** nTopology 5.x removed native CDB export from the Export FE Mesh block.  
+**Fix:** Set the Path to `waterbomb_mesh.inp` (Abaqus format).  Use `GeometryImporter.from_inp()`
+which converts to CDB via meshio automatically.  See §4 and §5.
+
+### BUG-12: `crease_tol_mm` too small — crease nodes not selected
+**Symptom:** `apply_waterbomb_fold_bcs()` reports 0 crease nodes and the fold never initialises.  
+**Root cause:** `crease_tol_mm` is smaller than the nTop mesh edge length, so no nodes fall
+within the selection band around the crease line.  
+**Fix:** Set `crease_tol_mm ≥ Mesh Tolerance / 2`.  For a 1 mm mesh tolerance use `crease_tol_mm: 0.6`.
+
+### BUG-13: `pin_center_radius_mm` too small — rigid body mode
+**Symptom:** Solver fails immediately with "singular stiffness matrix" or large initial displacement.  
+**Root cause:** No nodes found within the centre-pin radius → the structure has no translation constraint.  
+**Fix:** Increase `pin_center_radius_mm` (default 2.0 mm is appropriate for the 70 mm plate).
+Verify by checking the print output: *"BCs: centre patch pinned — N nodes"*.  If N=0, increase the radius.
+
+### BUG-14: meshio writes wrong element type (SHELL63 instead of SHELL181)
+**Symptom:** `from_inp()` imports successfully but elements are SHELL63 — old-style overlay shell.  
+**Root cause:** meshio maps nTopology's `triangle3` cells to MAPDL's SHELL63.  
+**Fix:** Always call `gi.reassign_element_type("SHELL181", ...)` after `from_inp()`, or pass
+`reassign_et="SHELL181"` directly to `from_inp()`.  This is handled automatically by
+`build_waterbomb_pipeline()`.
+
 ---
 
-## 15  Design Decisions
+## 17  Design Decisions
 
 | Decision | Why | Trade-off |
 |----------|-----|-----------|
@@ -660,7 +985,7 @@ Documented bugs from the origami EMI workflow and MAPDL projects:
 
 ---
 
-## 16  Glossary
+## 18  Glossary
 
 | Term | Definition |
 |------|-----------|

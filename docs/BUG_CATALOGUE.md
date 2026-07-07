@@ -181,3 +181,33 @@ Run Python with `-X utf8` flag if Unicode output is required:
 python -X utf8 smoke_tests/run_all.py
 ```
 **Code:** All print statements in `ams/` use ASCII-safe characters.
+
+---
+
+## BUG-15 — `write_crease_line_bcs` used incremental fold angle instead of cumulative
+
+**Status:** Fixed in `ams/mapdl/crease_line_bcs.py` and `run_waterbomb_fold.py`  
+**Symptom:** All 6 fold steps produce nearly identical tiny displacements (~0.5 mm instead
+of ~12 mm at 120° dihedral).  von Mises stress reaches 774 MPa — well past the 275 MPa
+yield stress — with no physical basis.  Displacements *decrease* slightly from step 1 to
+step 6.  
+**Root cause:** MAPDL D commands specify the **total** displacement from the initial
+undeformed configuration, not the displacement increment relative to the previous load step.
+The BC writer was computing:
+```
+half_rad = radians(delta_deg / 2)   # delta = change this step (~10 deg)
+```
+so every step prescribed the same ~5° rotation from flat.  After step 1 the structure was
+already at 5°; steps 2–6 re-prescribed 5° with nothing to ramp toward, so MAPDL had no
+driving displacement and left the state nearly unchanged.  The high stress arose from a
+BC conflict: some crease-line nodes were prescribed to +5° and their neighbours to -5°,
+creating a sharp incompatibility that drove the stress above yield.  
+**Fix:** Pass `target_dihedral_deg` (the final dihedral at the *end* of this load step)
+instead of the incremental `delta_deg`.  Compute:
+```
+half_rad = radians((180 - target_dihedral_deg) / 2)  # total fold from flat
+```
+This gives half_rad = 5° for step 1, 10° for step 2, ..., 30° for the final 120° step,
+so each load step prescribes a larger cumulative displacement and MAPDL ramps correctly.  
+**Code:** [ams/mapdl/crease_line_bcs.py](../ams/mapdl/crease_line_bcs.py) — `write_crease_line_bcs()`  
+[run_waterbomb_fold.py](../run_waterbomb_fold.py) — active crease dict now uses `target_dihedral_deg`

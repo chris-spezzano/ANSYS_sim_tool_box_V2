@@ -66,10 +66,21 @@ class HFSSRunner:
         # Purge stale project files — CRITICAL (see module docstring #3)
         cleanup_hfss_project(project_dir, project_name)
 
-        project_path = str(project_dir / f"{project_name}.aedt")
+        # MUST be absolute: AEDT resolves save_project's file_name against its
+        # own default working directory (~/Documents/Ansoft), not this
+        # process's CWD -- confirmed this session via the exact failure mode
+        # (AEDT API error citing a path under .../Documents/Ansoft/<relative
+        # path>, "directory must already exist") when a relative path was
+        # passed here.
+        project_path = str((project_dir / f"{project_name}.aedt").resolve())
         aedt_version = hfss_cfg.get("aedt_version", "2025.2")
         non_graphical = bool(hfss_cfg.get("non_graphical", True))
         timeout       = int(hfss_cfg.get("desktop_launch_timeout_s", 600))
+        # Default "Modal" (not AEDT's own out-of-the-box default "Terminal"):
+        # confirmed this session that Floquet ports -- this runner's main
+        # periodic/unit-cell use case -- raise "this type of boundary is not
+        # used when the solution type is driven terminal" under the default.
+        solution_type = hfss_cfg.get("solution_type", "Modal")
 
         log.info(
             "Launching HFSS %s — non_graphical=%s, project='%s'",
@@ -78,12 +89,24 @@ class HFSSRunner:
 
         try:
             import ansys.aedt.core as aedt
+            # NOT passing project=project_path here on purpose: Design.__init__,
+            # when the target .aedt file doesn't exist yet, creates a default-
+            # named project then calls oproject.Rename(full_path, True) to save
+            # it there in the same constructor call -- confirmed (this session,
+            # AEDT 2025.1 + PyAEDT 1.1.0 + non-graphical + gRPC) that this
+            # in-constructor Rename fails with GrpcApiError every time, even
+            # with a clean process state and an existing parent directory.
+            # save_project(file_name=...) called AFTER construction uses a
+            # different code path and works reliably -- so construct with the
+            # default project name, then save/rename to the real path
+            # ourselves, deliberately out of the constructor's control.
             self._hfss = aedt.Hfss(
-                project       = project_path,
                 non_graphical = non_graphical,
                 new_desktop   = True,        # always open fresh (see docstring #2)
                 version       = aedt_version,
+                solution_type = solution_type,
             )
+            self._hfss.save_project(file_name=project_path)
             log.info("HFSS connected successfully")
         except Exception as exc:
             raise ConnectionError(

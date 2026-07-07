@@ -28,9 +28,9 @@ ROOT = Path(__file__).parent.parent
 SMOKE = Path(__file__).parent
 
 OFFLINE_TESTS = [
-    (SMOKE / "test_resources.py",   "Resources (offline)"),
-    (SMOKE / "test_mesh_quality.py","Mesh Quality (offline)"),
-    (SMOKE / "test_pipeline.py",    "Pipeline & Materials (offline)"),
+    (SMOKE / "test_01_environment.py", "Environment & Imports"),
+    (SMOKE / "test_02_geometry.py",    "Config & Solver Strategy"),
+    (SMOKE / "test_03_mesh_quality.py","Mesh Quality & Pipeline"),
 ]
 
 LIVE_MAPDL_TEST = (SMOKE / "test_live_mapdl.py", "Live MAPDL patch test")
@@ -55,7 +55,7 @@ def _run(script: Path, label: str, extra_args: list[str] | None = None) -> bool:
 def main():
     run_live      = "--live" in sys.argv
     run_hfss      = "--hfss" in sys.argv and run_live
-    dry_run_live  = not run_live   # pass --dry-run to live tests when not in live mode
+
 
     print("=" * 60)
     print("  ANSYS Simulation Toolbox — Full Smoke Test Suite")
@@ -124,11 +124,11 @@ def main():
 
 def _script_name(label: str) -> str:
     mapping = {
-        "Resources (offline)":          "test_resources.py",
-        "Mesh Quality (offline)":        "test_mesh_quality.py",
-        "Pipeline & Materials (offline)":"test_pipeline.py",
-        "Live MAPDL patch test":         "test_live_mapdl.py",
-        "Live HFSS smoke test":          "test_live_hfss.py",
+        "Environment & Imports":    "test_01_environment.py",
+        "Config & Solver Strategy": "test_02_geometry.py",
+        "Mesh Quality & Pipeline":  "test_03_mesh_quality.py",
+        "Live MAPDL patch test":    "test_live_mapdl.py",
+        "Live HFSS smoke test":     "test_live_hfss.py",
     }
     return mapping.get(label, label)
 

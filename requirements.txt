@@ -7,6 +7,7 @@ ansys-aedt-core>=0.10.0
 pyvista>=0.46.0
 trimesh>=4.0.0
 numpy-stl>=3.0.0
+meshio>=5.3.0          # Abaqus .inp → ANSYS .cdb conversion
 
 # Scientific computing
 numpy>=1.24.0
